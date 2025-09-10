@@ -21,10 +21,15 @@ def _parse_range(value: str | tuple[int, int]) -> tuple[int, int]:
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False, extra="ignore")
 
-    # Adapter + credentials (mock only in this PoC)
+    # Adapter + credentials (mock by default; xhs optional)
     ADAPTER: str = Field(default="mock")
     USERNAME: str = Field(default="")
     PASSWORD: str = Field(default="")
+
+    # Xiaohongshu (XHS) optional configuration for the XhsAdapter stub
+    XHS_BASE_URL: str = Field(default="https://www.xiaohongshu.com")
+    XHS_USER_AGENT: str = Field(default="EngageBot/0.1 (+https://example.com)")
+    XHS_COOKIE: str = Field(default="")
 
     # Discovery defaults
     DEFAULT_TAG: str = Field(default="fitness")

@@ -6,6 +6,7 @@ import typer
 
 from engagebot.adapters.base import ServiceAdapter
 from engagebot.adapters.mock import MockAdapter
+from engagebot.adapters.xhs import XhsAdapter
 from engagebot.config import Settings, load_settings
 from engagebot.controller import Controller
 from engagebot.logging_setup import setup_logging
@@ -18,7 +19,13 @@ app = typer.Typer(help="EngageBot - Sandbox Engagement CLI")
 def _build_adapter(settings: Settings) -> ServiceAdapter:
     if settings.ADAPTER.lower() == "mock":
         return MockAdapter(settings)
-    raise typer.BadParameter("Only ADAPTER='mock' is supported in this PoC.")
+    if settings.ADAPTER.lower() in {"xhs", "xiaohongshu"}:
+        return XhsAdapter(
+            base_url=settings.XHS_BASE_URL,
+            user_agent=settings.XHS_USER_AGENT,
+            cookie=settings.XHS_COOKIE,
+        )
+    raise typer.BadParameter("Unknown adapter. Use 'mock' or 'xhs'.")
 
 
 def _choose_strategy(name: str, seed: int):
