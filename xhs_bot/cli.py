@@ -9,7 +9,7 @@ import re
 
 from urllib.parse import quote_plus, urljoin
 
-from playwright.async_api import async_playwright, Browser, BrowserContext, Page
+from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Playwright
 
 
 DEFAULT_USER_DATA_DIR = str(Path.home() / ".xhs_bot" / "user_data")
@@ -24,7 +24,7 @@ class BotConfig:
     timeout_ms: int = 30000
 
 
-async def create_context(config: BotConfig) -> tuple[Browser, BrowserContext]:
+async def create_context(config: BotConfig) -> tuple[Playwright, BrowserContext]:
     pw = await async_playwright().start()
     browser = await pw.chromium.launch_persistent_context(
         user_data_dir=config.user_data_dir,
@@ -39,7 +39,7 @@ async def create_context(config: BotConfig) -> tuple[Browser, BrowserContext]:
     # launch_persistent_context returns BrowserContext (as browser)
     # For unified return, expose context as ctx and the underlying browser via _browser
     # but Playwright's persistent returns context-like; we just return (None, context)
-    return (None, browser)  # type: ignore
+    return (pw, browser)  # type: ignore
 
 
 async def goto_home(page: Page) -> None:
@@ -364,7 +364,7 @@ async def search_latest_posts(
 
 
 async def cmd_login(config: BotConfig) -> int:
-    _, context = await create_context(config)
+    pw, context = await create_context(config)
     page = context.pages[0] if context.pages else await context.new_page()
     await goto_home(page)
     print("A browser window will open. Log in manually; your session will persist.")
@@ -373,29 +373,47 @@ async def cmd_login(config: BotConfig) -> int:
         while True:
             await asyncio.sleep(1)
     except (KeyboardInterrupt, asyncio.CancelledError):
-        pass
+        print("Exiting and saving session...")
     finally:
-        await context.close()
+        try:
+            await context.close()
+        finally:
+            try:
+                await pw.stop()
+            except Exception:
+                pass
     return 0
 
 
 async def cmd_like(config: BotConfig, url: str) -> int:
-    _, context = await create_context(config)
+    pw, context = await create_context(config)
     try:
         await like_post(context, url)
         print("Liked:", url)
     finally:
-        await context.close()
+        try:
+            await context.close()
+        finally:
+            try:
+                await pw.stop()
+            except Exception:
+                pass
     return 0
 
 
 async def cmd_comment(config: BotConfig, url: str, comment: str) -> int:
-    _, context = await create_context(config)
+    pw, context = await create_context(config)
     try:
         await comment_post(context, url, comment)
         print("Commented on:", url)
     finally:
-        await context.close()
+        try:
+            await context.close()
+        finally:
+            try:
+                await pw.stop()
+            except Exception:
+                pass
     return 0
 
 
@@ -404,7 +422,7 @@ async def cmd_batch(config: BotConfig, manifest_path: str) -> int:
     manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     actions = manifest.get("actions", [])
     delay_ms = int(manifest.get("delay_ms", 2000))
-    _, context = await create_context(config)
+    pw, context = await create_context(config)
     try:
         for action in actions:
             action_type = action.get("type")
@@ -425,17 +443,29 @@ async def cmd_batch(config: BotConfig, manifest_path: str) -> int:
                 print("Unknown action type:", action_type)
             await asyncio.sleep(delay_ms / 1000.0)
     finally:
-        await context.close()
+        try:
+            await context.close()
+        finally:
+            try:
+                await pw.stop()
+            except Exception:
+                pass
     return 0
 
 
 async def cmd_search(config: BotConfig, keyword: str, limit: int, search_type: str) -> int:
-    _, context = await create_context(config)
+    pw, context = await create_context(config)
     try:
         posts = await search_latest_posts(context, keyword, limit, search_type)
         print(json.dumps(posts, ensure_ascii=False, indent=2))
     finally:
-        await context.close()
+        try:
+            await context.close()
+        finally:
+            try:
+                await pw.stop()
+            except Exception:
+                pass
     return 0
 
 
@@ -446,7 +476,7 @@ async def cmd_like_latest(
     delay_ms: int,
     search_type: str,
 ) -> int:
-    _, context = await create_context(config)
+    pw, context = await create_context(config)
     try:
         posts = await search_latest_posts(context, keyword, limit, search_type)
         for post in posts:
@@ -460,7 +490,13 @@ async def cmd_like_latest(
                 print("Failed to like:", url, "-", str(e))
             await asyncio.sleep(delay_ms / 1000.0)
     finally:
-        await context.close()
+        try:
+            await context.close()
+        finally:
+            try:
+                await pw.stop()
+            except Exception:
+                pass
     return 0
 
 
