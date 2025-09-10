@@ -32,6 +32,12 @@ xhs-bot like <post_url> [--headless] [--user-data ~/.xhs_bot/user_data]
 xhs-bot comment <post_url> <comment text...> [--headless] [--user-data ~/.xhs_bot/user_data]
 
 xhs-bot batch manifest.json [--headless] [--user-data ~/.xhs_bot/user_data]
+
+# Search latest posts by keyword (prints JSON)
+xhs-bot search "crossfit" --limit 10 [--search-type 51] [--headless]
+
+# Like latest N posts for a keyword
+xhs-bot like-latest "crossfit" --limit 10 --delay-ms 1500 [--search-type 51] [--headless]
 ```
 
 Batch manifest format
@@ -52,6 +58,7 @@ Notes
 - The first time, run `xhs-bot login` without `--headless` and complete login; cookies persist.
 - Selectors are best-effort and may require updates if site UI changes.
 - Use `--slow 150` for debugging to see interactions.
+- The `search`/`like-latest` commands navigate to `https://www.xiaohongshu.com/search_result/?keyword=<kw>&type=51` and attempt to select the "最新" (Latest) tab, then harvest visible posts. Adjust `--search-type` if needed.
 
 Disclaimer
 ----------
