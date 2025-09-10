@@ -5,6 +5,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+import re
 
 from urllib.parse import quote_plus, urljoin
 
@@ -54,21 +55,128 @@ async def ensure_logged_in(context: BrowserContext) -> Page:
 async def like_post(context: BrowserContext, url: str) -> None:
     page = context.pages[0] if context.pages else await context.new_page()
     await page.goto(url, wait_until="domcontentloaded")
-    # Try multiple selectors for like button
+    # Give the page a moment to render interactive elements
+    try:
+        await page.wait_for_load_state("networkidle", timeout=5000)
+    except Exception:
+        pass
+
+    # 1) Role-based selector with text matching (robust across markup changes)
+    try:
+        role_locator = page.get_by_role("button", name=re.compile("赞|点赞|Like|喜欢", re.I))
+        if await role_locator.count() > 0:
+            await role_locator.first.click()
+            return
+    except Exception:
+        pass
+
+    # 2) Common CSS-based heuristics
     candidate_selectors = [
         "button[aria-label='like']",
+        "button[aria-label*='like' i]",
+        "[role='button'][aria-label*='like' i]",
         "[data-testid='like']",
+        "[data-testid*='like' i]",
         "button:has(svg[aria-label='like'])",
+        "button:has(svg[aria-label*='like' i])",
+        "[role='button']:has(svg[aria-label*='like' i])",
         "button:has-text('赞')",
+        "button:has-text('点赞')",
+        "[role='button']:has-text('赞')",
+        "[role='button']:has-text('点赞')",
+        "[class*='like' i][role='button']",
+        "[class*='Like' i][role='button']",
+        "[class*='zan' i][role='button']",
+        "[class*='dianzan' i][role='button']",
+        "[class*='like' i]:has(svg)",
+        "[class*='zan' i]:has(svg)",
     ]
     for selector in candidate_selectors:
         try:
-            el = await page.wait_for_selector(selector, timeout=3000)
+            el = await page.wait_for_selector(selector, timeout=1500)
             if el:
                 await el.click()
                 return
         except Exception:
             continue
+
+    # 3) Text-based locator fallback
+    try:
+        text_locator = page.get_by_text(re.compile("^\s*(赞|点赞)\s*$"))
+        if await text_locator.count() > 0:
+            target = text_locator.first
+            # Click the nearest clickable ancestor if needed
+            # Try direct click first
+            try:
+                await target.click()
+                return
+            except Exception:
+                pass
+            # Fallback: traverse DOM to find a clickable ancestor
+            el_handle = await target.element_handle()
+            if el_handle:
+                ancestor = await page.evaluate_handle(
+                    """
+                    (el) => {
+                      function isClickable(n) {
+                        if (!n) return false;
+                        const tag = (n.tagName || '').toLowerCase();
+                        if (tag === 'button') return true;
+                        if (n.getAttribute && (n.getAttribute('role') === 'button')) return true;
+                        if (n.onclick) return true;
+                        return false;
+                      }
+                      let cur = el;
+                      for (let i = 0; i < 5 && cur; i++) {
+                        if (isClickable(cur)) return cur;
+                        cur = cur.parentElement;
+                      }
+                      return el;
+                    }
+                    """,
+                    el_handle,
+                )
+                clickable = await ancestor.as_element()
+                if clickable:
+                    await clickable.click()
+                    return
+    except Exception:
+        pass
+
+    # 4) Scripted heuristic: look for visible elements with like-related hints
+    try:
+        candidate = await page.evaluate_handle(
+            """
+            () => {
+              const HINT_RE = /(like|zan|dianzan|heart)/i;
+              const TEXTS = ['赞','点赞','Like','喜欢'];
+              function isVisible(el) {
+                if (!el) return false;
+                const s = window.getComputedStyle(el);
+                if (s && (s.visibility === 'hidden' || s.display === 'none')) return false;
+                const r = el.getBoundingClientRect();
+                return r.width > 0 && r.height > 0;
+              }
+              const nodes = Array.from(document.querySelectorAll('button, [role="button"], a, div, span'));
+              for (const el of nodes) {
+                if (!isVisible(el)) continue;
+                const txt = (el.innerText || el.textContent || '').trim();
+                const hasText = TEXTS.some(t => txt.includes(t));
+                const cls = (el.className || '').toString();
+                const hint = HINT_RE.test(cls);
+                if (hasText || hint) return el;
+              }
+              return null;
+            }
+            """
+        )
+        el = await candidate.as_element()
+        if el:
+            await el.click()
+            return
+    except Exception:
+        pass
+
     raise RuntimeError("Unable to find like button. UI may have changed or requires login.")
 
 
@@ -344,8 +452,11 @@ async def cmd_like_latest(
             url = post.get("url", "")
             if not url:
                 continue
-            await like_post(context, url)
-            print("Liked:", url)
+            try:
+                await like_post(context, url)
+                print("Liked:", url)
+            except Exception as e:
+                print("Failed to like:", url, "-", str(e))
             await asyncio.sleep(delay_ms / 1000.0)
     finally:
         await context.close()
