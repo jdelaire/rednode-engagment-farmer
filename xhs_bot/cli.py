@@ -372,9 +372,10 @@ async def cmd_login(config: BotConfig) -> int:
     try:
         while True:
             await asyncio.sleep(1)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
         pass
-    await context.close()
+    finally:
+        await context.close()
     return 0
 
 
