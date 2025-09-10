@@ -40,6 +40,17 @@ xhs-bot search "crossfit" --limit 10 [--search-type 51] [--headless]
 xhs-bot like-latest "crossfit" --limit 10 --delay-ms 1500 [--search-type 51] [--headless]
 ```
 
+Global flags
+------------
+
+- `--user-data <path>`: Persistent browser profile directory (keeps login session)
+- `--headless`: Run without displaying a window
+- `--slow <ms>`: Slow motion delay between actions (useful for debugging)
+- `--timeout <ms>`: Default operation timeout
+- `--search-type <type>`: XHS search type (default `51` = notes)
+- `--limit <n>`: Number of items to fetch/process for search/like-latest (default 10)
+- `--delay-ms <ms>`: Delay between likes in like-latest (default 2000)
+
 Batch manifest format
 ---------------------
 
@@ -59,6 +70,25 @@ Notes
 - Selectors are best-effort and may require updates if site UI changes.
 - Use `--slow 150` for debugging to see interactions.
 - The `search`/`like-latest` commands navigate to `https://www.xiaohongshu.com/search_result/?keyword=<kw>&type=51` and attempt to select the "最新" (Latest) tab, then harvest visible posts. Adjust `--search-type` if needed.
+- The like action uses multiple robust heuristics (role-based, CSS, text, and DOM evaluation). If one URL fails, `like-latest` logs the error and continues with the next.
+
+Sample search output
+--------------------
+
+```json
+[
+  {
+    "url": "https://www.xiaohongshu.com/explore/XXXXXXXX",
+    "title": "Crossfit WOD ...",
+    "image": "https://.../cover.jpg"
+  },
+  {
+    "url": "https://www.xiaohongshu.com/explore/YYYYYYYY",
+    "title": "My first crossfit class",
+    "image": ""
+  }
+]
+```
 
 Disclaimer
 ----------
