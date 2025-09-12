@@ -71,6 +71,7 @@ Notes
 - Use `--slow 150` for debugging to see interactions.
 - The `search`/`like-latest` commands navigate to `https://www.xiaohongshu.com/search_result/?keyword=<kw>&type=51` and attempt to select the "最新" (Latest) tab, then harvest visible posts. Adjust `--search-type` if needed.
 - The like action uses multiple robust heuristics (role-based, CSS, text, and DOM evaluation). If one URL fails, `like-latest` logs the error and continues with the next.
+- Some notes are app-only on web and show an overlay like "当前笔记暂时无法浏览". These are detected and skipped automatically during `like-latest` and `like`.
 
 Sample search output
 --------------------

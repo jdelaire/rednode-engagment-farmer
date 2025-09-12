@@ -13,6 +13,11 @@ from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 
 
 DEFAULT_USER_DATA_DIR = str(Path.home() / ".xhs_bot" / "user_data")
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/126.0.0.0 Safari/537.36"
+)
 
 
 @dataclass
@@ -23,6 +28,11 @@ class BotConfig:
     locale: str = "en-US"
     timeout_ms: int = 30000
     verbose: bool = False
+    user_agent: str = DEFAULT_USER_AGENT
+
+
+class AppOnlyNoteError(RuntimeError):
+    pass
 
 
 async def create_context(config: BotConfig) -> tuple[Playwright, BrowserContext]:
@@ -32,6 +42,7 @@ async def create_context(config: BotConfig) -> tuple[Playwright, BrowserContext]
         headless=config.headless,
         slow_mo=config.slow_mo_ms,
         locale=config.locale,
+        user_agent=config.user_agent,
         args=[
             "--no-sandbox",
         ],
@@ -53,6 +64,31 @@ async def ensure_logged_in(context: BrowserContext) -> Page:
     return page
 
 
+async def _is_app_only_note(page: Page) -> bool:
+    app_only_phrases = [
+        "当前笔记暂时无法浏览",
+        "请打开小红书App扫码查看",
+        "请使用小红书App扫码查看",
+        "返回首页",
+        "小红书如何扫码",
+        "问题反馈",
+    ]
+    for phrase in app_only_phrases:
+        try:
+            loc = page.get_by_text(phrase)
+            await loc.first.wait_for(timeout=800)
+            return True
+        except Exception:
+            continue
+    try:
+        body_text = await page.evaluate("() => document.body ? document.body.innerText || '' : ''")
+        if body_text and ("无法浏览" in body_text and "小红书" in body_text):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 async def like_post(context: BrowserContext, url: str) -> None:
     page = context.pages[0] if context.pages else await context.new_page()
     await page.goto(url, wait_until="domcontentloaded")
@@ -61,6 +97,9 @@ async def like_post(context: BrowserContext, url: str) -> None:
         await page.wait_for_load_state("networkidle", timeout=5000)
     except Exception:
         pass
+
+    if await _is_app_only_note(page):
+        raise AppOnlyNoteError("Note is app-only; skipping")
 
     # 1) Role-based selector with text matching (robust across markup changes)
     try:
@@ -238,6 +277,7 @@ def parse_common_args(argv: List[str]) -> tuple[BotConfig, List[str], Any]:
     parser.add_argument("--delay-ms", dest="delay_ms", type=int, default=2000, help="Delay between actions in like-latest")
     parser.add_argument("--search-type", dest="search_type", default="51", help="XHS search type parameter (51=notes)")
     parser.add_argument("--verbose", action="store_true", help="Print verbose progress output")
+    parser.add_argument("--user-agent", dest="user_agent", default=DEFAULT_USER_AGENT, help="Override browser User-Agent string")
     ns = parser.parse_args(argv)
     config = BotConfig(
         user_data_dir=ns.user_data_dir,
@@ -245,6 +285,7 @@ def parse_common_args(argv: List[str]) -> tuple[BotConfig, List[str], Any]:
         slow_mo_ms=ns.slow_mo_ms,
         timeout_ms=ns.timeout_ms,
         verbose=ns.verbose,
+        user_agent=ns.user_agent,
     )
     return config, [ns.command] + ns.args, ns
 
@@ -393,8 +434,11 @@ async def cmd_like(config: BotConfig, url: str) -> int:
     try:
         if config.verbose:
             print("Liking:", url)
-        await like_post(context, url)
-        print("Liked:", url)
+        try:
+            await like_post(context, url)
+            print("Liked:", url)
+        except AppOnlyNoteError as e:
+            print("Skipped (app-only):", url)
     finally:
         try:
             await context.close()
@@ -437,8 +481,11 @@ async def cmd_batch(config: BotConfig, manifest_path: str) -> int:
             if action_type == "like":
                 if config.verbose:
                     print("Liking:", url)
-                await like_post(context, url)
-                print("Liked:", url)
+                try:
+                    await like_post(context, url)
+                    print("Liked:", url)
+                except AppOnlyNoteError:
+                    print("Skipped (app-only):", url)
             elif action_type == "comment":
                 comment = action.get("comment", "")
                 if not comment:
@@ -503,6 +550,8 @@ async def cmd_like_latest(
                     print("Liked:", url)
                 else:
                     print("Liked:", url)
+            except AppOnlyNoteError:
+                print("Skipped (app-only):", url)
             except Exception as e:
                 print("Failed to like:", url, "-", str(e))
             await asyncio.sleep(delay_ms / 1000.0)
