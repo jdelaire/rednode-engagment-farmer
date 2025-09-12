@@ -407,6 +407,111 @@ async def search_latest_posts(
     return collected[:limit]
 
 
+async def like_latest_from_search(
+    context: BrowserContext,
+    keyword: str,
+    limit: int = 10,
+    search_type: str = "51",
+    verbose: bool = False,
+) -> List[Dict[str, Any]]:
+    page = context.pages[0] if context.pages else await context.new_page()
+    base_url = "https://www.xiaohongshu.com"
+    search_url = f"{base_url}/search_result/?keyword={quote_plus(keyword)}&source=web_explore_feed&type={search_type}"
+    await page.goto(search_url, wait_until="domcontentloaded")
+    await _maybe_select_latest_tab(page)
+
+    liked_items: List[Dict[str, Any]] = []
+    seen_explore_ids: set[str] = set()
+
+    async def extract_note_info(note_handle) -> Dict[str, Any]:
+        data = await page.evaluate(
+            """
+            (note) => {
+              const exploreA = note.querySelector('a[href^="/explore/"]');
+              const searchA = note.querySelector('a[href^="/search_result/"]');
+              const hrefRaw = (exploreA && exploreA.getAttribute('href')) || (searchA && searchA.getAttribute('href')) || '';
+              let exploreHref = '';
+              if (hrefRaw.startsWith('/explore/')) {
+                exploreHref = new URL(hrefRaw, 'https://www.xiaohongshu.com').toString();
+              } else if (hrefRaw.startsWith('/search_result/')) {
+                const id = hrefRaw.split('/').pop()?.split('?')[0] || '';
+                if (id) {
+                  exploreHref = new URL('/explore/' + id, 'https://www.xiaohongshu.com').toString();
+                }
+              }
+              const titleEl = note.querySelector('.footer .title');
+              const title = titleEl ? (titleEl.textContent || '').trim() : '';
+              const useEl = note.querySelector('svg.like-icon use');
+              const likeHref = useEl ? useEl.getAttribute('xlink:href') || useEl.getAttribute('href') || '' : '';
+              const alreadyLiked = likeHref.includes('liked');
+              return { exploreHref, title, alreadyLiked };
+            }
+            """,
+            note_handle,
+        )
+        return cast(Dict[str, Any], data)  # type: ignore
+
+    from typing import cast
+
+    idle_rounds = 0
+    max_rounds = 120
+    last_liked_count = 0
+    while len(liked_items) < limit and idle_rounds < 8 and max_rounds > 0:
+        max_rounds -= 1
+        note_handles = await page.query_selector_all("section.note-item")
+        progress = False
+        for note in note_handles:
+            info = await extract_note_info(note)
+            url = info.get("exploreHref") or ""
+            if not url:
+                continue
+            if url in seen_explore_ids:
+                continue
+            seen_explore_ids.add(url)
+            if info.get("alreadyLiked"):
+                continue
+            # Try clicking like in this card
+            try:
+                like_target = await note.query_selector("span.like-wrapper, svg.like-icon, .like-wrapper .like-icon")
+                if like_target is None:
+                    continue
+                if verbose:
+                    print("Liking:", url)
+                await like_target.click()
+                try:
+                    await page.wait_for_function(
+                        "(note) => { const u = note.querySelector('svg.like-icon use'); return u && (u.getAttribute('xlink:href')||u.getAttribute('href')||'').includes('liked'); }",
+                        arg=note,
+                        timeout=2000,
+                    )
+                except Exception:
+                    # If we cannot confirm state change quickly, still proceed
+                    pass
+                liked_items.append({"url": url, "title": info.get("title", "")})
+                progress = True
+                if verbose:
+                    print("Liked:", url)
+                if len(liked_items) >= limit:
+                    break
+            except Exception:
+                continue
+        if len(liked_items) == last_liked_count and not progress:
+            idle_rounds += 1
+        else:
+            idle_rounds = 0
+        last_liked_count = len(liked_items)
+        if len(liked_items) >= limit:
+            break
+        # Scroll to load more
+        try:
+            await page.evaluate("() => window.scrollBy(0, Math.max(400, window.innerHeight * 0.9))")
+        except Exception:
+            pass
+        await asyncio.sleep(0.8)
+
+    return liked_items[:limit]
+
+
 async def cmd_login(config: BotConfig) -> int:
     pw, context = await create_context(config)
     page = context.pages[0] if context.pages else await context.new_page()
@@ -532,28 +637,9 @@ async def cmd_like_latest(
 ) -> int:
     pw, context = await create_context(config)
     try:
-        posts = await search_latest_posts(context, keyword, limit, search_type)
-        total = len(posts)
-        if config.verbose:
-            print(f"Found {total} posts for keyword '{keyword}':")
-            for idx, p in enumerate(posts, start=1):
-                print(f"  [{idx}/{total}] {p.get('url','')}")
-        for post in posts:
-            url = post.get("url", "")
-            if not url:
-                continue
-            if config.verbose:
-                print(f"Liking: {url}")
-            try:
-                await like_post(context, url)
-                if config.verbose:
-                    print("Liked:", url)
-                else:
-                    print("Liked:", url)
-            except AppOnlyNoteError:
-                print("Skipped (app-only):", url)
-            except Exception as e:
-                print("Failed to like:", url, "-", str(e))
+        liked = await like_latest_from_search(context, keyword, limit, search_type, verbose=config.verbose)
+        for item in liked:
+            print("Liked:", item.get("url", ""))
             await asyncio.sleep(delay_ms / 1000.0)
     finally:
         try:
