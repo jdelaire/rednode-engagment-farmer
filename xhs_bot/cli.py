@@ -643,7 +643,7 @@ async def like_latest_from_search(
         except Exception:
             pass
 
-    async def _maybe_open_note_or_author(note) -> None:
+    async def _maybe_open_note_or_author(note) -> bool:
         try:
             r = random.random()
             if r <= config.open_note_prob:
@@ -659,6 +659,7 @@ async def like_latest_from_search(
                         pass
                     await page.go_back()
                     await asyncio.sleep(random.uniform(0.4, 1.0))
+                    return True
             elif r <= config.open_note_prob + config.open_author_prob:
                 author = await note.query_selector('a.author')
                 if author:
@@ -671,8 +672,10 @@ async def like_latest_from_search(
                         pass
                     await page.go_back()
                     await asyncio.sleep(random.uniform(0.4, 1.0))
+                    return True
         except Exception:
             pass
+        return False
 
     async def _is_rate_limited() -> bool:
         try:
@@ -691,7 +694,11 @@ async def like_latest_from_search(
             random.shuffle(note_handles)
         progress = False
         for note in note_handles:
-            info = await extract_note_info(note)
+            try:
+                info = await extract_note_info(note)
+            except Exception:
+                # The note handle might be detached due to DOM updates; skip
+                continue
             url = info.get("exploreHref") or ""
             if not url:
                 continue
@@ -726,8 +733,10 @@ async def like_latest_from_search(
                 progress = True
                 if config.verbose:
                     print("Liked:", url)
-                # Occasionally open interactions
-                await _maybe_open_note_or_author(note)
+                # Occasionally open interactions; if we navigated, break to reacquire handles
+                navigated = await _maybe_open_note_or_author(note)
+                if navigated:
+                    break
                 if len(liked_items) >= session_like_target:
                     break
             except Exception:
@@ -896,7 +905,7 @@ async def cmd_like_latest(
         for i, item in enumerate(liked, start=1):
             print("Liked:", item.get("url", ""))
             # Ramp-up slower at the beginning of the session
-            elapsed = time.monotonic()
+            elapsed = time.monotonic()  # monotonic seconds since process start
             base_delay = delay_ms
             if config.ramp_up_s > 0 and elapsed < config.ramp_up_s:
                 ramp_factor = 1.0 + (config.ramp_up_s - elapsed) / config.ramp_up_s
