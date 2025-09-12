@@ -1,0 +1,1 @@
+xhs-bot like-latest "crossfit" --limit 15 --delay-ms 1800 --delay-jitter-pct 40 --delay-model gauss --like-prob 0.8 --ramp-up-s 25 --long-pause-prob 0.18 --open-note-prob 0.0 --open-author-prob 0.00 --toggle-tab-prob 0.2 --verbose --user-data /Users/jdelaire/sources/rednode-engagment-farmer/LoginInfo
