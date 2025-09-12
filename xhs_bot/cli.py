@@ -22,6 +22,7 @@ class BotConfig:
     slow_mo_ms: int = 50
     locale: str = "en-US"
     timeout_ms: int = 30000
+    verbose: bool = False
 
 
 async def create_context(config: BotConfig) -> tuple[Playwright, BrowserContext]:
@@ -236,12 +237,14 @@ def parse_common_args(argv: List[str]) -> tuple[BotConfig, List[str], Any]:
     parser.add_argument("--limit", dest="limit", type=int, default=10, help="Number of posts to process for search/like-latest")
     parser.add_argument("--delay-ms", dest="delay_ms", type=int, default=2000, help="Delay between actions in like-latest")
     parser.add_argument("--search-type", dest="search_type", default="51", help="XHS search type parameter (51=notes)")
+    parser.add_argument("--verbose", action="store_true", help="Print verbose progress output")
     ns = parser.parse_args(argv)
     config = BotConfig(
         user_data_dir=ns.user_data_dir,
         headless=ns.headless,
         slow_mo_ms=ns.slow_mo_ms,
         timeout_ms=ns.timeout_ms,
+        verbose=ns.verbose,
     )
     return config, [ns.command] + ns.args, ns
 
@@ -388,6 +391,8 @@ async def cmd_login(config: BotConfig) -> int:
 async def cmd_like(config: BotConfig, url: str) -> int:
     pw, context = await create_context(config)
     try:
+        if config.verbose:
+            print("Liking:", url)
         await like_post(context, url)
         print("Liked:", url)
     finally:
@@ -430,6 +435,8 @@ async def cmd_batch(config: BotConfig, manifest_path: str) -> int:
             if not url:
                 continue
             if action_type == "like":
+                if config.verbose:
+                    print("Liking:", url)
                 await like_post(context, url)
                 print("Liked:", url)
             elif action_type == "comment":
@@ -479,13 +486,23 @@ async def cmd_like_latest(
     pw, context = await create_context(config)
     try:
         posts = await search_latest_posts(context, keyword, limit, search_type)
+        total = len(posts)
+        if config.verbose:
+            print(f"Found {total} posts for keyword '{keyword}':")
+            for idx, p in enumerate(posts, start=1):
+                print(f"  [{idx}/{total}] {p.get('url','')}")
         for post in posts:
             url = post.get("url", "")
             if not url:
                 continue
+            if config.verbose:
+                print(f"Liking: {url}")
             try:
                 await like_post(context, url)
-                print("Liked:", url)
+                if config.verbose:
+                    print("Liked:", url)
+                else:
+                    print("Liked:", url)
             except Exception as e:
                 print("Failed to like:", url, "-", str(e))
             await asyncio.sleep(delay_ms / 1000.0)
