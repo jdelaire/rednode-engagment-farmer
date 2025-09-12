@@ -1,4 +1,4 @@
-THIS SHOULD BE A LINTER ERRORimport asyncio
+import asyncio
 import json
 import os
 import sys
@@ -43,7 +43,7 @@ class BotConfig:
     long_pause_prob: float = 0.15
     long_pause_min_s: float = 4.0
     long_pause_max_s: float = 10.0
-    open_note_prob: float = 0.0
+    open_note_prob: float = 0.12
     open_author_prob: float = 0.0
     toggle_tab_prob: float = 0.2
     random_viewport: bool = True
@@ -351,7 +351,7 @@ def parse_common_args(argv: List[str]) -> tuple[BotConfig, List[str], Any]:
     parser.add_argument("--long-pause-prob", dest="long_pause_prob", type=float, default=0.15, help="Chance to insert long think pause")
     parser.add_argument("--long-pause-min-s", dest="long_pause_min_s", type=float, default=4.0, help="Min long pause seconds")
     parser.add_argument("--long-pause-max-s", dest="long_pause_max_s", type=float, default=10.0, help="Max long pause seconds")
-    parser.add_argument("--open-note-prob", dest="open_note_prob", type=float, default=0.0, help="Chance to open a note briefly")
+    parser.add_argument("--open-note-prob", dest="open_note_prob", type=float, default=0.12, help="Chance to open a note briefly")
     parser.add_argument("--open-author-prob", dest="open_author_prob", type=float, default=0.0, help="Chance to open an author profile briefly")
     parser.add_argument("--toggle-tab-prob", dest="toggle_tab_prob", type=float, default=0.2, help="Chance to toggle tabs and back")
     parser.add_argument("--random-viewport", dest="random_viewport", action="store_true", default=True, help="Enable random viewport size")
