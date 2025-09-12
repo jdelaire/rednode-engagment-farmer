@@ -362,6 +362,7 @@ def parse_common_args(argv: List[str]) -> tuple[BotConfig, List[str], Any]:
     parser.add_argument("--session-cap-min", dest="session_cap_min", type=int, default=0, help="Soft min likes per session")
     parser.add_argument("--session-cap-max", dest="session_cap_max", type=int, default=0, help="Soft max likes per session")
     parser.add_argument("--daily-cap", dest="daily_cap", type=int, default=0, help="Max likes per day (not persisted)")
+    parser.add_argument("--duration-min", dest="duration_min", type=int, default=0, help="Spread likes across this many minutes (0=disabled)")
     ns = parser.parse_args(argv)
     config = BotConfig(
         user_data_dir=ns.user_data_dir,
@@ -564,6 +565,7 @@ async def like_latest_from_search(
     keyword: str,
     limit: int = 10,
     search_type: str = "51",
+    duration_sec: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     page = context.pages[0] if context.pages else await context.new_page()
     base_url = "https://www.xiaohongshu.com"
@@ -699,6 +701,12 @@ async def like_latest_from_search(
         except Exception:
             return False
 
+    # If a duration is provided, compute per-like spacing with a bit of jitter
+    spacing_sec = None
+    if duration_sec and session_like_target > 0:
+        spacing_sec = max(1.0, duration_sec / float(session_like_target))
+    schedule_jitter_frac = 0.2
+
     while len(liked_items) < session_like_target and idle_rounds < 8 and max_rounds > 0:
         max_rounds -= 1
         note_handles = await page.query_selector_all("section.note-item")
@@ -728,6 +736,16 @@ async def like_latest_from_search(
 
         progress = False
         for note, info in ordered:
+            # Enforce run duration and spacing schedule if provided
+            if duration_sec and spacing_sec:
+                target_time = start_ts + len(liked_items) * spacing_sec
+                target_time += random.uniform(-schedule_jitter_frac, schedule_jitter_frac) * spacing_sec
+                now = time.monotonic()
+                if now < target_time:
+                    await asyncio.sleep(target_time - now)
+                # hard stop if overall duration exceeded
+                if now > start_ts + duration_sec:
+                    break
             url = info.get("exploreHref") or ""
             if not url or url in seen_explore_ids:
                 continue
@@ -921,7 +939,29 @@ async def cmd_like_latest(
 ) -> int:
     pw, context = await create_context(config)
     try:
-        liked = await like_latest_from_search(context, config, keyword, limit, search_type)
+        duration_sec = None
+        # ns is not directly available here; use environment variable override if needed or pass via args
+        # We parsed duration_min in parse_common_args, but did not store it in config.
+        # As a simple approach, derive from argv or set via env XHS_DURATION_MIN; else 0.
+        try:
+            # Try to infer from sys.argv
+            if "--duration-min" in sys.argv:
+                idx = sys.argv.index("--duration-min")
+                duration_min = int(sys.argv[idx + 1])
+                if duration_min > 0:
+                    duration_sec = duration_min * 60
+        except Exception:
+            pass
+        if duration_sec is None:
+            env_min = os.environ.get("XHS_DURATION_MIN")
+            if env_min:
+                try:
+                    em = int(env_min)
+                    if em > 0:
+                        duration_sec = em * 60
+                except Exception:
+                    pass
+        liked = await like_latest_from_search(context, config, keyword, limit, search_type, duration_sec=duration_sec)
         for i, item in enumerate(liked, start=1):
             print("Liked:", item.get("url", ""))
             # Ramp-up slower at the beginning of the session
