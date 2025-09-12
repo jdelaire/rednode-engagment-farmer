@@ -205,7 +205,7 @@ async def like_post(context: BrowserContext, url: str) -> None:
 
     # 3) Text-based locator fallback
     try:
-        text_locator = page.get_by_text(re.compile("^\s*(赞|点赞)\s*$"))
+        text_locator = page.get_by_text(re.compile(r"^\s*(赞|点赞)\s*$"))
         if await text_locator.count() > 0:
             target = text_locator.first
             # Click the nearest clickable ancestor if needed
@@ -598,7 +598,19 @@ async def like_latest_from_search(
               const useEl = note.querySelector('svg.like-icon use');
               const likeHref = useEl ? useEl.getAttribute('xlink:href') || useEl.getAttribute('href') || '' : '';
               const alreadyLiked = likeHref.includes('liked');
-              return { exploreHref, title, alreadyLiked };
+              const countEl = note.querySelector('.like-wrapper .count');
+              let likeCount = null;
+              if (countEl) {
+                const raw = (countEl.textContent || '').trim();
+                const mW = raw.match(/^(\d+(?:\.\d+)?)\s*[wW]$/);
+                if (mW) {
+                  likeCount = Math.round(parseFloat(mW[1]) * 10000);
+                } else {
+                  const m = raw.match(/\d+/);
+                  if (m) likeCount = parseInt(m[0], 10);
+                }
+              }
+              return { exploreHref, title, alreadyLiked, likeCount };
             }
             """,
             note_handle,
@@ -690,33 +702,46 @@ async def like_latest_from_search(
     while len(liked_items) < session_like_target and idle_rounds < 8 and max_rounds > 0:
         max_rounds -= 1
         note_handles = await page.query_selector_all("section.note-item")
-        if config.random_order and note_handles:
-            random.shuffle(note_handles)
-        progress = False
+        # Build candidate list with extracted info
+        candidates: List[tuple[Any, Dict[str, Any]]] = []
         for note in note_handles:
             try:
                 info = await extract_note_info(note)
             except Exception:
-                # The note handle might be detached due to DOM updates; skip
                 continue
             url = info.get("exploreHref") or ""
             if not url:
                 continue
             if url in seen_explore_ids:
                 continue
-            seen_explore_ids.add(url)
             if info.get("alreadyLiked"):
                 continue
+            candidates.append((note, info))
+
+        # Prioritize low-like cards (< 10), then the rest
+        low_like = [(n, i) for (n, i) in candidates if isinstance(i.get("likeCount"), (int, float)) and i.get("likeCount") is not None and i.get("likeCount") < 10]
+        others = [(n, i) for (n, i) in candidates if (n, i) not in low_like]
+        if config.random_order:
+            random.shuffle(low_like)
+            random.shuffle(others)
+        ordered = low_like + others
+
+        progress = False
+        for note, info in ordered:
+            url = info.get("exploreHref") or ""
+            if not url or url in seen_explore_ids:
+                continue
+            seen_explore_ids.add(url)
             # Randomly skip this card
             if random.random() > max(0.0, min(1.0, config.like_prob)):
                 continue
-            # Try clicking like in this card
             try:
                 like_target = await note.query_selector("span.like-wrapper, svg.like-icon, .like-wrapper .like-icon")
                 if like_target is None:
                     continue
                 if config.verbose:
-                    print("Liking:", url)
+                    lc_repr = info.get("likeCount")
+                    print(f"Liking: {url} (likes={lc_repr})")
                 await maybe_hover_element(page, like_target, config.hover_prob)
                 await _maybe_mouse_wiggle()
                 await like_target.click()
@@ -727,13 +752,11 @@ async def like_latest_from_search(
                         timeout=2000,
                     )
                 except Exception:
-                    # If we cannot confirm state change quickly, still proceed
                     pass
                 liked_items.append({"url": url, "title": info.get("title", "")})
                 progress = True
                 if config.verbose:
                     print("Liked:", url)
-                # Opening notes/authors disabled per configuration (probabilities set to 0)
                 if len(liked_items) >= session_like_target:
                     break
             except Exception:

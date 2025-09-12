@@ -93,6 +93,7 @@ Notes
 - The like action uses multiple robust heuristics (role-based, CSS, text, and DOM evaluation). If one URL fails, `like-latest` logs the error and continues with the next.
 - Some notes are app-only on web and show an overlay like "当前笔记暂时无法浏览". These are detected and skipped automatically during `like-latest` and `like`.
 - `like-latest` performs likes directly from the search results grid without opening each note. Already-liked cards (their like icon shows `#liked`) are skipped.
+- The bot prioritizes cards with fewer than 10 likes first (based on the count shown on each card), then processes the rest according to your randomization settings.
 
 Sample search output
 --------------------
