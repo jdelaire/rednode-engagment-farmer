@@ -50,6 +50,11 @@ Global flags
 - `--search-type <type>`: XHS search type (default `51` = notes)
 - `--limit <n>`: Number of items to fetch/process for search/like-latest (default 10)
 - `--delay-ms <ms>`: Delay between likes in like-latest (default 2000)
+- `--verbose`: Print detailed progress logs
+- `--user-agent <ua>`: Override User-Agent (desktop UA used by default)
+- `--delay-jitter-pct <pct>`: Randomize each delay by ±pct% (default 30)
+- `--hover-prob <0..1>`: Probability to hover a like icon before clicking (default 0.6)
+- `--no-stealth`: Disable stealth tweaks (navigator.webdriver undefined by default)
 
 Batch manifest format
 ---------------------

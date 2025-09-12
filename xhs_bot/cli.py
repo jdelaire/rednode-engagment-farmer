@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import re
+import random
 
 from urllib.parse import quote_plus, urljoin
 
@@ -29,6 +30,9 @@ class BotConfig:
     timeout_ms: int = 30000
     verbose: bool = False
     user_agent: str = DEFAULT_USER_AGENT
+    delay_jitter_pct: int = 30
+    hover_prob: float = 0.6
+    stealth: bool = True
 
 
 class AppOnlyNoteError(RuntimeError):
@@ -48,6 +52,19 @@ async def create_context(config: BotConfig) -> tuple[Playwright, BrowserContext]
         ],
         viewport={"width": 1280, "height": 800},
     )
+    if config.stealth:
+        try:
+            await browser.add_init_script(
+                """
+                () => {
+                  try {
+                    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                  } catch (e) {}
+                }
+                """
+            )
+        except Exception:
+            pass
     # launch_persistent_context returns BrowserContext (as browser)
     # For unified return, expose context as ctx and the underlying browser via _browser
     # but Playwright's persistent returns context-like; we just return (None, context)
@@ -278,6 +295,9 @@ def parse_common_args(argv: List[str]) -> tuple[BotConfig, List[str], Any]:
     parser.add_argument("--search-type", dest="search_type", default="51", help="XHS search type parameter (51=notes)")
     parser.add_argument("--verbose", action="store_true", help="Print verbose progress output")
     parser.add_argument("--user-agent", dest="user_agent", default=DEFAULT_USER_AGENT, help="Override browser User-Agent string")
+    parser.add_argument("--delay-jitter-pct", dest="delay_jitter_pct", type=int, default=30, help="Randomize each delay by ±pct%")
+    parser.add_argument("--hover-prob", dest="hover_prob", type=float, default=0.6, help="Probability to hover an element before clicking")
+    parser.add_argument("--no-stealth", dest="stealth", action="store_false", default=True, help="Disable stealth init scripts")
     ns = parser.parse_args(argv)
     config = BotConfig(
         user_data_dir=ns.user_data_dir,
@@ -286,8 +306,39 @@ def parse_common_args(argv: List[str]) -> tuple[BotConfig, List[str], Any]:
         timeout_ms=ns.timeout_ms,
         verbose=ns.verbose,
         user_agent=ns.user_agent,
+        delay_jitter_pct=ns.delay_jitter_pct,
+        hover_prob=ns.hover_prob,
+        stealth=ns.stealth,
     )
     return config, [ns.command] + ns.args, ns
+
+
+def compute_jittered_delay_seconds(base_delay_ms: int, jitter_pct: int) -> float:
+    if base_delay_ms <= 0:
+        return 0.0
+    jitter_fraction = max(0, min(jitter_pct, 95)) / 100.0
+    min_factor = 1.0 - jitter_fraction
+    max_factor = 1.0 + jitter_fraction
+    factor = random.uniform(min_factor, max_factor)
+    total_ms = max(50, int(base_delay_ms * factor))
+    return total_ms / 1000.0
+
+
+async def maybe_hover_element(page: Page, element_handle, hover_probability: float) -> None:
+    try:
+        if random.random() <= max(0.0, min(1.0, hover_probability)):
+            # Prefer realistic mouse move to a random point within element bounds
+            box = await element_handle.bounding_box()
+            if box:
+                target_x = box["x"] + random.uniform(0.2, 0.8) * box["width"]
+                target_y = box["y"] + random.uniform(0.2, 0.8) * box["height"]
+                await page.mouse.move(target_x, target_y)
+            else:
+                await element_handle.hover()
+            await asyncio.sleep(random.uniform(0.08, 0.25))
+    except Exception:
+        # Hover is a best-effort nicety; ignore failures
+        pass
 
 
 async def _maybe_select_latest_tab(page: Page) -> None:
@@ -477,6 +528,7 @@ async def like_latest_from_search(
                     continue
                 if verbose:
                     print("Liking:", url)
+                await maybe_hover_element(page, like_target, 0.6)
                 await like_target.click()
                 try:
                     await page.wait_for_function(
@@ -504,10 +556,12 @@ async def like_latest_from_search(
             break
         # Scroll to load more
         try:
-            await page.evaluate("() => window.scrollBy(0, Math.max(400, window.innerHeight * 0.9))")
+            # Randomized scroll distance and micro-pauses
+            scroll_y = random.randint(int(0.6 * 800), int(1.3 * 800))
+            await page.evaluate("(y) => window.scrollBy(0, y)", scroll_y)
         except Exception:
             pass
-        await asyncio.sleep(0.8)
+        await asyncio.sleep(random.uniform(0.4, 1.1))
 
     return liked_items[:limit]
 
@@ -640,7 +694,7 @@ async def cmd_like_latest(
         liked = await like_latest_from_search(context, keyword, limit, search_type, verbose=config.verbose)
         for item in liked:
             print("Liked:", item.get("url", ""))
-            await asyncio.sleep(delay_ms / 1000.0)
+            await asyncio.sleep(compute_jittered_delay_seconds(delay_ms, config.delay_jitter_pct))
     finally:
         try:
             await context.close()
