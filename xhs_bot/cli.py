@@ -4,9 +4,12 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 import re
 import random
+import time
+from datetime import datetime
+import math
 
 from urllib.parse import quote_plus, urljoin
 
@@ -33,6 +36,26 @@ class BotConfig:
     delay_jitter_pct: int = 30
     hover_prob: float = 0.6
     stealth: bool = True
+    like_prob: float = 0.8
+    random_order: bool = True
+    delay_model: str = "gauss"  # uniform|gauss|lognorm
+    ramp_up_s: int = 30
+    long_pause_prob: float = 0.15
+    long_pause_min_s: float = 4.0
+    long_pause_max_s: float = 10.0
+    open_note_prob: float = 0.12
+    open_author_prob: float = 0.08
+    toggle_tab_prob: float = 0.2
+    random_viewport: bool = True
+    viewport_min_w: int = 1180
+    viewport_max_w: int = 1600
+    viewport_min_h: int = 720
+    viewport_max_h: int = 1000
+    accept_language: Optional[str] = None
+    timezone_id: Optional[str] = None
+    session_cap_min: int = 0
+    session_cap_max: int = 0
+    daily_cap: int = 0
 
 
 class AppOnlyNoteError(RuntimeError):
@@ -41,6 +64,13 @@ class AppOnlyNoteError(RuntimeError):
 
 async def create_context(config: BotConfig) -> tuple[Playwright, BrowserContext]:
     pw = await async_playwright().start()
+    # Randomize viewport if enabled
+    viewport = {"width": 1280, "height": 800}
+    if config.random_viewport:
+        viewport = {
+            "width": random.randint(config.viewport_min_w, config.viewport_max_w),
+            "height": random.randint(config.viewport_min_h, config.viewport_max_h),
+        }
     browser = await pw.chromium.launch_persistent_context(
         user_data_dir=config.user_data_dir,
         headless=config.headless,
@@ -50,7 +80,7 @@ async def create_context(config: BotConfig) -> tuple[Playwright, BrowserContext]
         args=[
             "--no-sandbox",
         ],
-        viewport={"width": 1280, "height": 800},
+        viewport=viewport,
     )
     if config.stealth:
         try:
@@ -65,6 +95,22 @@ async def create_context(config: BotConfig) -> tuple[Playwright, BrowserContext]
             )
         except Exception:
             pass
+    # Accept-Language and timezone as best-effort context emulation
+    try:
+        if config.accept_language:
+            for page in browser.pages:
+                await page.add_init_script(
+                    f"""
+                    () => {{
+                      try {{ Object.defineProperty(navigator, 'language', {{ get: () => '{config.accept_language.split(',')[0].strip()}' }}); }} catch (e) {{}}
+                      try {{ Object.defineProperty(navigator, 'languages', {{ get: () => {json.dumps([p.strip() for p in (config.accept_language.split(',') if config.accept_language else [])])} }}); }} catch (e) {{}}
+                    }}
+                    """
+                )
+        if config.timezone_id:
+            await browser.grant_permissions([], time_zone_id=config.timezone_id)  # type: ignore
+    except Exception:
+        pass
     # launch_persistent_context returns BrowserContext (as browser)
     # For unified return, expose context as ctx and the underlying browser via _browser
     # but Playwright's persistent returns context-like; we just return (None, context)
@@ -298,6 +344,24 @@ def parse_common_args(argv: List[str]) -> tuple[BotConfig, List[str], Any]:
     parser.add_argument("--delay-jitter-pct", dest="delay_jitter_pct", type=int, default=30, help="Randomize each delay by ±pct%")
     parser.add_argument("--hover-prob", dest="hover_prob", type=float, default=0.6, help="Probability to hover an element before clicking")
     parser.add_argument("--no-stealth", dest="stealth", action="store_false", default=True, help="Disable stealth init scripts")
+    parser.add_argument("--like-prob", dest="like_prob", type=float, default=0.8, help="Probability to like a given card")
+    parser.add_argument("--no-random-order", dest="random_order", action="store_false", help="Disable randomization of processing order")
+    parser.add_argument("--delay-model", dest="delay_model", default="gauss", choices=["uniform","gauss","lognorm"], help="Delay distribution model")
+    parser.add_argument("--ramp-up-s", dest="ramp_up_s", type=int, default=30, help="Warm-up seconds with slower pace initially")
+    parser.add_argument("--long-pause-prob", dest="long_pause_prob", type=float, default=0.15, help="Chance to insert long think pause")
+    parser.add_argument("--long-pause-min-s", dest="long_pause_min_s", type=float, default=4.0, help="Min long pause seconds")
+    parser.add_argument("--long-pause-max-s", dest="long_pause_max_s", type=float, default=10.0, help="Max long pause seconds")
+    parser.add_argument("--open-note-prob", dest="open_note_prob", type=float, default=0.12, help="Chance to open a note briefly")
+    parser.add_argument("--open-author-prob", dest="open_author_prob", type=float, default=0.08, help="Chance to open an author profile briefly")
+    parser.add_argument("--toggle-tab-prob", dest="toggle_tab_prob", type=float, default=0.2, help="Chance to toggle tabs and back")
+    parser.add_argument("--random-viewport", dest="random_viewport", action="store_true", default=True, help="Enable random viewport size")
+    parser.add_argument("--viewport-w", dest="viewport_w", type=int, help="Fixed viewport width (overrides random)")
+    parser.add_argument("--viewport-h", dest="viewport_h", type=int, help="Fixed viewport height (overrides random)")
+    parser.add_argument("--accept-language", dest="accept_language", help="Override Accept-Language / navigator.languages")
+    parser.add_argument("--timezone-id", dest="timezone_id", help="Override timezone ID (e.g., Asia/Shanghai)")
+    parser.add_argument("--session-cap-min", dest="session_cap_min", type=int, default=0, help="Soft min likes per session")
+    parser.add_argument("--session-cap-max", dest="session_cap_max", type=int, default=0, help="Soft max likes per session")
+    parser.add_argument("--daily-cap", dest="daily_cap", type=int, default=0, help="Max likes per day (not persisted)")
     ns = parser.parse_args(argv)
     config = BotConfig(
         user_data_dir=ns.user_data_dir,
@@ -309,6 +373,26 @@ def parse_common_args(argv: List[str]) -> tuple[BotConfig, List[str], Any]:
         delay_jitter_pct=ns.delay_jitter_pct,
         hover_prob=ns.hover_prob,
         stealth=ns.stealth,
+        like_prob=ns.like_prob,
+        random_order=ns.random_order,
+        delay_model=ns.delay_model,
+        ramp_up_s=ns.ramp_up_s,
+        long_pause_prob=ns.long_pause_prob,
+        long_pause_min_s=ns.long_pause_min_s,
+        long_pause_max_s=ns.long_pause_max_s,
+        open_note_prob=ns.open_note_prob,
+        open_author_prob=ns.open_author_prob,
+        toggle_tab_prob=ns.toggle_tab_prob,
+        random_viewport=(False if (ns.viewport_w and ns.viewport_h) else ns.random_viewport),
+        viewport_min_w=ns.viewport_w or 1180,
+        viewport_max_w=ns.viewport_w or 1600,
+        viewport_min_h=ns.viewport_h or 720,
+        viewport_max_h=ns.viewport_h or 1000,
+        accept_language=ns.accept_language,
+        timezone_id=ns.timezone_id,
+        session_cap_min=ns.session_cap_min,
+        session_cap_max=ns.session_cap_max,
+        daily_cap=ns.daily_cap,
     )
     return config, [ns.command] + ns.args, ns
 
@@ -339,6 +423,22 @@ async def maybe_hover_element(page: Page, element_handle, hover_probability: flo
     except Exception:
         # Hover is a best-effort nicety; ignore failures
         pass
+
+
+def draw_delay_seconds(base_delay_ms: int, jitter_pct: int, model: str) -> float:
+    base_s = base_delay_ms / 1000.0
+    if model == "uniform":
+        return compute_jittered_delay_seconds(base_delay_ms, jitter_pct)
+    if model == "gauss":
+        sigma = base_s * max(0.05, min(jitter_pct, 95) / 150.0)
+        val = random.gauss(mu=base_s, sigma=sigma)
+        return max(0.05, val)
+    if model == "lognorm":
+        sigma = max(0.05, min(jitter_pct, 95) / 100.0)
+        mu = max(0.01, math.log(base_s) - 0.5 * sigma * sigma)
+        val = random.lognormvariate(mu, sigma)
+        return max(0.05, val)
+    return compute_jittered_delay_seconds(base_delay_ms, jitter_pct)
 
 
 async def _maybe_select_latest_tab(page: Page) -> None:
@@ -460,10 +560,10 @@ async def search_latest_posts(
 
 async def like_latest_from_search(
     context: BrowserContext,
+    config: BotConfig,
     keyword: str,
     limit: int = 10,
     search_type: str = "51",
-    verbose: bool = False,
 ) -> List[Dict[str, Any]]:
     page = context.pages[0] if context.pages else await context.new_page()
     base_url = "https://www.xiaohongshu.com"
@@ -471,8 +571,11 @@ async def like_latest_from_search(
     await page.goto(search_url, wait_until="domcontentloaded")
     await _maybe_select_latest_tab(page)
 
+    start_ts = time.monotonic()
+
     liked_items: List[Dict[str, Any]] = []
     seen_explore_ids: set[str] = set()
+    session_like_target = limit
 
     async def extract_note_info(note_handle) -> Dict[str, Any]:
         data = await page.evaluate(
@@ -507,9 +610,85 @@ async def like_latest_from_search(
     idle_rounds = 0
     max_rounds = 120
     last_liked_count = 0
-    while len(liked_items) < limit and idle_rounds < 8 and max_rounds > 0:
+
+    # Soft session cap
+    if config.session_cap_min or config.session_cap_max:
+        lo = config.session_cap_min or 1
+        hi = config.session_cap_max or max(limit, lo)
+        session_like_target = max(1, min(limit, random.randint(lo, hi)))
+        if config.verbose:
+            print(f"Session like target: {session_like_target}")
+
+    async def _maybe_toggle_tabs() -> None:
+        try:
+            if random.random() <= config.toggle_tab_prob:
+                tabs = await page.query_selector_all("button.tab, .tab")
+                if tabs:
+                    random_tab = random.choice(tabs)
+                    await random_tab.click()
+                    await asyncio.sleep(random.uniform(0.5, 1.2))
+                    # Try to re-select Latest if available
+                    await _maybe_select_latest_tab(page)
+        except Exception:
+            pass
+
+    async def _maybe_mouse_wiggle() -> None:
+        try:
+            # Small wiggle around current mouse position
+            for _ in range(random.randint(1, 3)):
+                dx = random.randint(-20, 20)
+                dy = random.randint(-10, 10)
+                await page.mouse.move(max(1, dx), max(1, dy))
+                await asyncio.sleep(random.uniform(0.03, 0.09))
+        except Exception:
+            pass
+
+    async def _maybe_open_note_or_author(note) -> None:
+        try:
+            r = random.random()
+            if r <= config.open_note_prob:
+                a = await note.query_selector('a[href^="/search_result/"]')
+                if a:
+                    await a.click()
+                    await asyncio.sleep(random.uniform(1.2, 3.5))
+                    # random wheel scroll a bit
+                    try:
+                        await page.mouse.wheel(0, random.randint(150, 500))
+                        await asyncio.sleep(random.uniform(0.2, 0.6))
+                    except Exception:
+                        pass
+                    await page.go_back()
+                    await asyncio.sleep(random.uniform(0.4, 1.0))
+            elif r <= config.open_note_prob + config.open_author_prob:
+                author = await note.query_selector('a.author')
+                if author:
+                    await author.click()
+                    await asyncio.sleep(random.uniform(1.0, 3.0))
+                    try:
+                        await page.mouse.wheel(0, random.randint(200, 600))
+                        await asyncio.sleep(random.uniform(0.2, 0.6))
+                    except Exception:
+                        pass
+                    await page.go_back()
+                    await asyncio.sleep(random.uniform(0.4, 1.0))
+        except Exception:
+            pass
+
+    async def _is_rate_limited() -> bool:
+        try:
+            txt = await page.evaluate("() => document.body ? document.body.innerText : ''")
+            if not txt:
+                return False
+            patterns = ["操作频繁", "行为异常", "验证", "验证码", "verify", "captcha", "限制"]
+            return any(p in txt for p in patterns)
+        except Exception:
+            return False
+
+    while len(liked_items) < session_like_target and idle_rounds < 8 and max_rounds > 0:
         max_rounds -= 1
         note_handles = await page.query_selector_all("section.note-item")
+        if config.random_order and note_handles:
+            random.shuffle(note_handles)
         progress = False
         for note in note_handles:
             info = await extract_note_info(note)
@@ -521,14 +700,18 @@ async def like_latest_from_search(
             seen_explore_ids.add(url)
             if info.get("alreadyLiked"):
                 continue
+            # Randomly skip this card
+            if random.random() > max(0.0, min(1.0, config.like_prob)):
+                continue
             # Try clicking like in this card
             try:
                 like_target = await note.query_selector("span.like-wrapper, svg.like-icon, .like-wrapper .like-icon")
                 if like_target is None:
                     continue
-                if verbose:
+                if config.verbose:
                     print("Liking:", url)
-                await maybe_hover_element(page, like_target, 0.6)
+                await maybe_hover_element(page, like_target, config.hover_prob)
+                await _maybe_mouse_wiggle()
                 await like_target.click()
                 try:
                     await page.wait_for_function(
@@ -541,9 +724,11 @@ async def like_latest_from_search(
                     pass
                 liked_items.append({"url": url, "title": info.get("title", "")})
                 progress = True
-                if verbose:
+                if config.verbose:
                     print("Liked:", url)
-                if len(liked_items) >= limit:
+                # Occasionally open interactions
+                await _maybe_open_note_or_author(note)
+                if len(liked_items) >= session_like_target:
                     break
             except Exception:
                 continue
@@ -552,18 +737,34 @@ async def like_latest_from_search(
         else:
             idle_rounds = 0
         last_liked_count = len(liked_items)
-        if len(liked_items) >= limit:
+        if len(liked_items) >= session_like_target:
             break
-        # Scroll to load more
+        # Scroll to load more with randomization
         try:
-            # Randomized scroll distance and micro-pauses
+            await _maybe_toggle_tabs()
             scroll_y = random.randint(int(0.6 * 800), int(1.3 * 800))
-            await page.evaluate("(y) => window.scrollBy(0, y)", scroll_y)
+            if random.random() < 0.6:
+                await page.mouse.wheel(0, scroll_y)
+            else:
+                await page.evaluate("(y) => window.scrollBy(0, y)", scroll_y)
+                if random.random() < 0.25:
+                    await asyncio.sleep(random.uniform(0.2, 0.6))
+                    await page.mouse.wheel(0, -random.randint(50, 200))
         except Exception:
             pass
-        await asyncio.sleep(random.uniform(0.4, 1.1))
+        # Long think pause sometimes
+        if random.random() <= config.long_pause_prob:
+            await asyncio.sleep(random.uniform(config.long_pause_min_s, config.long_pause_max_s))
+        else:
+            await asyncio.sleep(random.uniform(0.4, 1.1))
+        # Basic rate limit detection
+        if await _is_rate_limited():
+            if config.verbose:
+                print("Detected potential rate limit or verification. Backing off.")
+            await asyncio.sleep(random.uniform(30.0, 90.0))
+            break
 
-    return liked_items[:limit]
+    return liked_items[:session_like_target]
 
 
 async def cmd_login(config: BotConfig) -> int:
@@ -691,10 +892,16 @@ async def cmd_like_latest(
 ) -> int:
     pw, context = await create_context(config)
     try:
-        liked = await like_latest_from_search(context, keyword, limit, search_type, verbose=config.verbose)
-        for item in liked:
+        liked = await like_latest_from_search(context, config, keyword, limit, search_type)
+        for i, item in enumerate(liked, start=1):
             print("Liked:", item.get("url", ""))
-            await asyncio.sleep(compute_jittered_delay_seconds(delay_ms, config.delay_jitter_pct))
+            # Ramp-up slower at the beginning of the session
+            elapsed = time.monotonic()
+            base_delay = delay_ms
+            if config.ramp_up_s > 0 and elapsed < config.ramp_up_s:
+                ramp_factor = 1.0 + (config.ramp_up_s - elapsed) / config.ramp_up_s
+                base_delay = int(base_delay * ramp_factor)
+            await asyncio.sleep(draw_delay_seconds(base_delay, config.delay_jitter_pct, config.delay_model))
     finally:
         try:
             await context.close()

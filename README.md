@@ -55,6 +55,21 @@ Global flags
 - `--delay-jitter-pct <pct>`: Randomize each delay by ±pct% (default 30)
 - `--hover-prob <0..1>`: Probability to hover a like icon before clicking (default 0.6)
 - `--no-stealth`: Disable stealth tweaks (navigator.webdriver undefined by default)
+- `--like-prob <0..1>`: Probability to like a card (skip some to look organic)
+- `--no-random-order`: Disable randomization of card order
+- `--delay-model <uniform|gauss|lognorm>`: Delay distribution (default gauss)
+- `--ramp-up-s <seconds>`: Warm-up window where delays are longer initially
+- `--long-pause-prob <0..1>`: Chance of a longer "thinking" pause between actions
+- `--long-pause-min-s <seconds>`, `--long-pause-max-s <seconds>`: Bounds for long pauses
+- `--open-note-prob <0..1>`: Chance to briefly open a note and return
+- `--open-author-prob <0..1>`: Chance to briefly open an author profile and return
+- `--toggle-tab-prob <0..1>`: Chance to toggle search tabs and back
+- `--random-viewport`: Randomize viewport size per session (on by default)
+- `--viewport-w <px>`, `--viewport-h <px>`: Force fixed viewport (disables random viewport)
+- `--accept-language <list>`: Override languages, e.g. `en-US,en;q=0.9`
+- `--timezone-id <tz>`: Override timezone, e.g. `Asia/Shanghai`
+- `--session-cap-min <n>`, `--session-cap-max <n>`: Soft per-session like range (randomly chosen)
+- `--daily-cap <n>`: Soft per-day limit (not persisted)
 
 Batch manifest format
 ---------------------
