@@ -581,7 +581,7 @@ async def like_latest_from_search(
 
     async def extract_note_info(note_handle) -> Dict[str, Any]:
         data = await page.evaluate(
-            """
+            r"""
             (note) => {
               const exploreA = note.querySelector('a[href^="/explore/"]');
               const searchA = note.querySelector('a[href^="/search_result/"]');
