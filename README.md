@@ -32,7 +32,44 @@ xhs-bot like <post_url> [--headless] [--user-data ~/.xhs_bot/user_data]
 xhs-bot comment <post_url> <comment text...> [--headless] [--user-data ~/.xhs_bot/user_data]
 
 xhs-bot batch manifest.json [--headless] [--user-data ~/.xhs_bot/user_data]
+
+# Search latest posts by keyword (prints JSON)
+xhs-bot search "crossfit" --limit 10 [--search-type 51] [--headless]
+
+# Like latest N posts for a keyword
+xhs-bot like-latest "crossfit" --limit 10 --delay-ms 1500 [--search-type 51] [--headless]
 ```
+
+Global flags
+------------
+
+- `--user-data <path>`: Persistent browser profile directory (keeps login session)
+- `--headless`: Run without displaying a window
+- `--slow <ms>`: Slow motion delay between actions (useful for debugging)
+- `--timeout <ms>`: Default operation timeout
+- `--search-type <type>`: XHS search type (default `51` = notes)
+- `--limit <n>`: Number of items to fetch/process for search/like-latest (default 10)
+- `--delay-ms <ms>`: Delay between likes in like-latest (default 2000)
+- `--verbose`: Print detailed progress logs
+- `--user-agent <ua>`: Override User-Agent (desktop UA used by default)
+- `--delay-jitter-pct <pct>`: Randomize each delay by ±pct% (default 30)
+- `--hover-prob <0..1>`: Probability to hover a like icon before clicking (default 0.6)
+- `--no-stealth`: Disable stealth tweaks (navigator.webdriver undefined by default)
+- `--like-prob <0..1>`: Probability to like a card (skip some to look organic)
+- `--no-random-order`: Disable randomization of card order
+- `--delay-model <uniform|gauss|lognorm>`: Delay distribution (default gauss)
+- `--ramp-up-s <seconds>`: Warm-up window where delays are longer initially
+- `--long-pause-prob <0..1>`: Chance of a longer "thinking" pause between actions
+- `--long-pause-min-s <seconds>`, `--long-pause-max-s <seconds>`: Bounds for long pauses
+- `--open-note-prob <0..1>`: Chance to briefly open a note and return
+- `--open-author-prob <0..1>`: Chance to briefly open an author profile and return
+- `--toggle-tab-prob <0..1>`: Chance to toggle search tabs and back
+- `--random-viewport`: Randomize viewport size per session (on by default)
+- `--viewport-w <px>`, `--viewport-h <px>`: Force fixed viewport (disables random viewport)
+- `--accept-language <list>`: Override languages, e.g. `en-US,en;q=0.9`
+- `--timezone-id <tz>`: Override timezone, e.g. `Asia/Shanghai`
+- `--session-cap-min <n>`, `--session-cap-max <n>`: Soft per-session like range (randomly chosen)
+- `--daily-cap <n>`: Soft per-day limit (not persisted)
 
 Batch manifest format
 ---------------------
@@ -52,6 +89,29 @@ Notes
 - The first time, run `xhs-bot login` without `--headless` and complete login; cookies persist.
 - Selectors are best-effort and may require updates if site UI changes.
 - Use `--slow 150` for debugging to see interactions.
+- The `search`/`like-latest` commands navigate to `https://www.xiaohongshu.com/search_result/?keyword=<kw>&type=51` and attempt to select the "最新" (Latest) tab, then harvest visible posts. Adjust `--search-type` if needed.
+- The like action uses multiple robust heuristics (role-based, CSS, text, and DOM evaluation). If one URL fails, `like-latest` logs the error and continues with the next.
+- Some notes are app-only on web and show an overlay like "当前笔记暂时无法浏览". These are detected and skipped automatically during `like-latest` and `like`.
+- `like-latest` performs likes directly from the search results grid without opening each note. Already-liked cards (their like icon shows `#liked`) are skipped.
+- The bot prioritizes cards with fewer than 10 likes first (based on the count shown on each card), then processes the rest according to your randomization settings.
+
+Sample search output
+--------------------
+
+```json
+[
+  {
+    "url": "https://www.xiaohongshu.com/explore/XXXXXXXX",
+    "title": "Crossfit WOD ...",
+    "image": "https://.../cover.jpg"
+  },
+  {
+    "url": "https://www.xiaohongshu.com/explore/YYYYYYYY",
+    "title": "My first crossfit class",
+    "image": ""
+  }
+]
+```
 
 Disclaimer
 ----------
