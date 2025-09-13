@@ -22,6 +22,12 @@ USER_DATA="${USER_DATA:-${SCRIPT_DIR}/LoginInfo}"
 HEADLESS="${HEADLESS:-}"
 VERBOSE="${VERBOSE:-1}"
 
+# Check if xhs-bot command exists, if not create and activate virtual environment
+if ! command -v xhs-bot &> /dev/null; then
+    echo "xhs-bot command not found. Creating and activating virtual environment..."
+    python3 -m venv .venv && source .venv/bin/activate
+fi
+
 xhs-bot like-latest "$KEYWORD" \
   --limit "$LIMIT" \
   --delay-ms "$DELAY_MS" \
