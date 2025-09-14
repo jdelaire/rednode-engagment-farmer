@@ -24,6 +24,10 @@ DEFAULT_USER_AGENT = (
 )
 
 
+def now_ts() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
 @dataclass
 class BotConfig:
     user_data_dir: str = DEFAULT_USER_DATA_DIR
@@ -774,7 +778,7 @@ async def like_latest_from_search(
                 liked_items.append({"url": url, "title": info.get("title", "")})
                 progress = True
                 if config.verbose:
-                    print("Liked:", url)
+                    print(f"[{now_ts()}] Liked: {url}")
                 if len(liked_items) >= session_like_target:
                     break
             except Exception:
@@ -838,14 +842,23 @@ async def cmd_login(config: BotConfig) -> int:
 
 async def cmd_like(config: BotConfig, url: str) -> int:
     pw, context = await create_context(config)
+    start_time = time.time()
+    liked_success = False
+    skipped_app_only = False
+    error_count_like = 0
     try:
         if config.verbose:
             print("Liking:", url)
         try:
             await like_post(context, url)
-            print("Liked:", url)
+            print(f"[{now_ts()}] Liked: {url}")
+            liked_success = True
         except AppOnlyNoteError as e:
             print("Skipped (app-only):", url)
+            skipped_app_only = True
+        except Exception:
+            print("Error while liking:", url)
+            error_count_like += 1
     finally:
         try:
             await context.close()
@@ -854,6 +867,8 @@ async def cmd_like(config: BotConfig, url: str) -> int:
                 await pw.stop()
             except Exception:
                 pass
+    duration = time.time() - start_time
+    print(f"[{now_ts()}] Stats: total=1, liked={1 if liked_success else 0}, skipped_app_only={1 if skipped_app_only else 0}, errors={error_count_like}, duration_sec={duration:.2f}")
     return 0
 
 
@@ -879,6 +894,11 @@ async def cmd_batch(config: BotConfig, manifest_path: str) -> int:
     actions = manifest.get("actions", [])
     delay_ms = int(manifest.get("delay_ms", 2000))
     pw, context = await create_context(config)
+    start_time = time.time()
+    total_actions = 0
+    liked_count = 0
+    skipped_app_only = 0
+    error_count = 0
     try:
         for action in actions:
             action_type = action.get("type")
@@ -890,9 +910,14 @@ async def cmd_batch(config: BotConfig, manifest_path: str) -> int:
                     print("Liking:", url)
                 try:
                     await like_post(context, url)
-                    print("Liked:", url)
+                    print(f"[{now_ts()}] Liked: {url}")
+                    liked_count += 1
                 except AppOnlyNoteError:
                     print("Skipped (app-only):", url)
+                    skipped_app_only += 1
+                except Exception:
+                    print("Error while liking:", url)
+                    error_count += 1
             elif action_type == "comment":
                 comment = action.get("comment", "")
                 if not comment:
@@ -902,7 +927,10 @@ async def cmd_batch(config: BotConfig, manifest_path: str) -> int:
                     print("Commented:", url)
             else:
                 print("Unknown action type:", action_type)
+            total_actions += 1
             await asyncio.sleep(delay_ms / 1000.0)
+        duration = time.time() - start_time
+        print(f"[{now_ts()}] Stats: total_actions={total_actions}, liked={liked_count}, skipped_app_only={skipped_app_only}, errors={error_count}, duration_sec={duration:.2f}")
     finally:
         try:
             await context.close()
@@ -938,6 +966,7 @@ async def cmd_like_latest(
     search_type: str,
 ) -> int:
     pw, context = await create_context(config)
+    start_time = time.time()
     try:
         duration_sec = None
         # ns is not directly available here; use environment variable override if needed or pass via args
@@ -963,7 +992,7 @@ async def cmd_like_latest(
                     pass
         liked = await like_latest_from_search(context, config, keyword, limit, search_type, duration_sec=duration_sec)
         for i, item in enumerate(liked, start=1):
-            print("Liked:", item.get("url", ""))
+            print(f"[{now_ts()}] Liked: {item.get('url', '')}")
             # Ramp-up slower at the beginning of the session
             elapsed = time.monotonic()  # monotonic seconds since process start
             base_delay = delay_ms
@@ -971,6 +1000,8 @@ async def cmd_like_latest(
                 ramp_factor = 1.0 + (config.ramp_up_s - elapsed) / config.ramp_up_s
                 base_delay = int(base_delay * ramp_factor)
             await asyncio.sleep(draw_delay_seconds(base_delay, config.delay_jitter_pct, config.delay_model))
+        duration = time.time() - start_time
+        print(f"[{now_ts()}] Stats: total_liked={len(liked)}, duration_sec={duration:.2f}")
     finally:
         try:
             await context.close()
