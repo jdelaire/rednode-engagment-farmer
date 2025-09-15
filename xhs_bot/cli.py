@@ -517,7 +517,66 @@ def draw_delay_seconds(base_delay_ms: int, jitter_pct: int, model: str) -> float
 
 
 async def _maybe_select_latest_tab(page: Page) -> None:
-    candidate_selectors = [
+    """
+    Best-effort: switch the search sort to Latest (最新).
+
+    UI variants observed:
+    1) A visible tab/button labeled 最新 on the results page
+    2) 最新 option inside a right-side filter panel opened via a 按钮 labeled 筛选
+
+    We try direct click first, then open the filter and click 最新. All actions are
+    wrapped as best-effort so failures won't break the flow.
+    """
+
+    async def _click_visible_text_as_button(target_text: str) -> bool:
+        try:
+            handle = await page.evaluate_handle(
+                r"""
+                (txt) => {
+                  function isVisible(el) {
+                    if (!el) return false;
+                    const s = window.getComputedStyle(el);
+                    if (!s || s.visibility === 'hidden' || s.display === 'none') return false;
+                    const r = el.getBoundingClientRect();
+                    return r.width > 0 && r.height > 0;
+                  }
+                  function isClickable(el) {
+                    if (!el) return false;
+                    const tag = (el.tagName || '').toLowerCase();
+                    if (tag === 'button' || tag === 'a') return true;
+                    const role = el.getAttribute && el.getAttribute('role');
+                    if (role === 'button' || role === 'tab') return true;
+                    if (el.onclick) return true;
+                    return false;
+                  }
+                  const nodes = Array.from(document.querySelectorAll('button, [role="button"], [role="tab"], a, div, span, li'));
+                  for (const n of nodes) {
+                    const raw = (n.innerText || n.textContent || '').trim();
+                    if (raw === txt && isVisible(n)) {
+                      let cur = n;
+                      for (let i = 0; i < 5 && cur; i++) {
+                        if (isClickable(cur)) return cur;
+                        cur = cur.parentElement;
+                      }
+                      return n;
+                    }
+                  }
+                  return null;
+                }
+                """,
+                target_text,
+            )
+            el = await handle.as_element()
+            if el:
+                await el.click()
+                await page.wait_for_timeout(600)
+                return True
+        except Exception:
+            pass
+        return False
+
+    # 1) Try direct click on 最新 if it's already visible as a tab/button
+    direct_selectors = [
         "button:has-text('最新')",
         "a:has-text('最新')",
         "[role='tab']:has-text('最新')",
@@ -526,15 +585,55 @@ async def _maybe_select_latest_tab(page: Page) -> None:
         "button:has-text('Latest')",
         "a:has-text('Latest')",
     ]
-    for selector in candidate_selectors:
+    for selector in direct_selectors:
         try:
-            el = await page.wait_for_selector(selector, timeout=1500)
+            el = await page.wait_for_selector(selector, timeout=800)
             if el:
                 await el.click()
                 await page.wait_for_timeout(600)
                 return
         except Exception:
-            continue
+            pass
+
+    # 2) If not found, open the filter (筛选) panel, then click 最新 inside it
+    try:
+        opened = await _click_visible_text_as_button("筛选")
+        if not opened:
+            # Additional attempts via common selectors
+            for fsel in [
+                "button:has-text('筛选')",
+                "[role='button']:has-text('筛选')",
+                "div:has-text('筛选')",
+            ]:
+                try:
+                    el = await page.wait_for_selector(fsel, timeout=800)
+                    if el:
+                        await el.click()
+                        await page.wait_for_timeout(500)
+                        opened = True
+                        break
+                except Exception:
+                    continue
+        # With the panel open, click 最新
+        if opened:
+            if await _click_visible_text_as_button("最新"):
+                return
+            # Fallback via selectors inside overlay
+            for selector in [
+                "div[role='dialog'] button:has-text('最新')",
+                "div[role='dialog'] [role='button']:has-text('最新')",
+                "div[role='dialog'] a:has-text('最新')",
+            ]:
+                try:
+                    el = await page.wait_for_selector(selector, timeout=800)
+                    if el:
+                        await el.click()
+                        await page.wait_for_timeout(600)
+                        return
+                except Exception:
+                    continue
+    except Exception:
+        pass
 
 
 async def search_latest_posts(
