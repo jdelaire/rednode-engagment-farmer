@@ -66,6 +66,10 @@ class AppOnlyNoteError(RuntimeError):
     pass
 
 
+class AlreadyLikedError(RuntimeError):
+    pass
+
+
 async def create_context(config: BotConfig) -> tuple[Playwright, BrowserContext]:
     pw = await async_playwright().start()
     # Randomize viewport if enabled
@@ -168,12 +172,47 @@ async def like_post(context: BrowserContext, url: str) -> None:
     if await _is_app_only_note(page):
         raise AppOnlyNoteError("Note is app-only; skipping")
 
+    async def _is_liked_on_page() -> bool:
+        try:
+            return await page.evaluate(
+                """
+                () => {
+                  // Heuristics to detect liked state
+                  const useEl = document.querySelector('svg.like-icon use');
+                  const href = useEl ? (useEl.getAttribute('xlink:href') || useEl.getAttribute('href') || '') : '';
+                  if (href && href.toLowerCase().includes('liked')) return true;
+                  const pressed = document.querySelector('[aria-pressed="true"][aria-label*="like" i]');
+                  if (pressed) return true;
+                  const likedCls = document.querySelector('.like-wrapper.liked, .isLiked, .liked');
+                  return !!likedCls;
+                }
+                """
+            )
+        except Exception:
+            return False
+
+    # If already liked, skip without toggling
+    try:
+        if await _is_liked_on_page():
+            raise AlreadyLikedError("Already liked; skipping")
+    except Exception:
+        # If detection fails, continue best-effort
+        pass
+
     # 1) Role-based selector with text matching (robust across markup changes)
     try:
         role_locator = page.get_by_role("button", name=re.compile("赞|点赞|Like|喜欢", re.I))
         if await role_locator.count() > 0:
             await role_locator.first.click()
-            return
+            try:
+                await page.wait_for_function(
+                    "() => { const u = document.querySelector('svg.like-icon use'); return u && (u.getAttribute('xlink:href')||u.getAttribute('href')||'').toLowerCase().includes('liked'); }",
+                    timeout=2000,
+                )
+                return True  # type: ignore
+            except Exception:
+                if await _is_liked_on_page():
+                    return True  # type: ignore
     except Exception:
         pass
 
@@ -203,7 +242,15 @@ async def like_post(context: BrowserContext, url: str) -> None:
             el = await page.wait_for_selector(selector, timeout=1500)
             if el:
                 await el.click()
-                return
+                try:
+                    await page.wait_for_function(
+                        "() => { const u = document.querySelector('svg.like-icon use'); return u && (u.getAttribute('xlink:href')||u.getAttribute('href')||'').toLowerCase().includes('liked'); }",
+                        timeout=2000,
+                    )
+                    return True  # type: ignore
+                except Exception:
+                    if await _is_liked_on_page():
+                        return True  # type: ignore
         except Exception:
             continue
 
@@ -212,11 +259,18 @@ async def like_post(context: BrowserContext, url: str) -> None:
         text_locator = page.get_by_text(re.compile(r"^\s*(赞|点赞)\s*$"))
         if await text_locator.count() > 0:
             target = text_locator.first
-            # Click the nearest clickable ancestor if needed
             # Try direct click first
             try:
                 await target.click()
-                return
+                try:
+                    await page.wait_for_function(
+                        "() => { const u = document.querySelector('svg.like-icon use'); return u && (u.getAttribute('xlink:href')||u.getAttribute('href')||'').toLowerCase().includes('liked'); }",
+                        timeout=2000,
+                    )
+                    return True  # type: ignore
+                except Exception:
+                    if await _is_liked_on_page():
+                        return True  # type: ignore
             except Exception:
                 pass
             # Fallback: traverse DOM to find a clickable ancestor
@@ -246,7 +300,15 @@ async def like_post(context: BrowserContext, url: str) -> None:
                 clickable = await ancestor.as_element()
                 if clickable:
                     await clickable.click()
-                    return
+                    try:
+                        await page.wait_for_function(
+                            "() => { const u = document.querySelector('svg.like-icon use'); return u && (u.getAttribute('xlink:href')||u.getAttribute('href')||'').toLowerCase().includes('liked'); }",
+                            timeout=2000,
+                        )
+                        return True  # type: ignore
+                    except Exception:
+                        if await _is_liked_on_page():
+                            return True  # type: ignore
     except Exception:
         pass
 
@@ -280,11 +342,19 @@ async def like_post(context: BrowserContext, url: str) -> None:
         el = await candidate.as_element()
         if el:
             await el.click()
-            return
+            try:
+                await page.wait_for_function(
+                    "() => { const u = document.querySelector('svg.like-icon use'); return u && (u.getAttribute('xlink:href')||u.getAttribute('href')||'').toLowerCase().includes('liked'); }",
+                    timeout=2000,
+                )
+                return True  # type: ignore
+            except Exception:
+                if await _is_liked_on_page():
+                    return True  # type: ignore
     except Exception:
         pass
 
-    raise RuntimeError("Unable to find like button. UI may have changed or requires login.")
+    raise RuntimeError("Unable to like: no button found or state did not change to liked.")
 
 
 async def comment_post(context: BrowserContext, url: str, comment: str) -> None:
@@ -775,10 +845,22 @@ async def like_latest_from_search(
                     )
                 except Exception:
                     pass
-                liked_items.append({"url": url, "title": info.get("title", "")})
-                progress = True
-                if config.verbose:
-                    print(f"[{now_ts()}] Liked: {url}")
+                # Verify state changed to liked. If not, treat as already-liked or failed and do not count
+                try:
+                    state_changed = await page.evaluate(
+                        "(note) => { const u = note.querySelector('svg.like-icon use'); const href = u ? (u.getAttribute('xlink:href')||u.getAttribute('href')||'') : ''; return href.toLowerCase().includes('liked'); }",
+                        note,
+                    )
+                except Exception:
+                    state_changed = False
+                if state_changed:
+                    liked_items.append({"url": url, "title": info.get("title", "")})
+                    progress = True
+                    if config.verbose:
+                        print(f"[{now_ts()}] Liked: {url}")
+                else:
+                    if config.verbose:
+                        print(f"Skipped (already-liked or unchanged): {url}")
                 if len(liked_items) >= session_like_target:
                     break
             except Exception:
@@ -845,6 +927,7 @@ async def cmd_like(config: BotConfig, url: str) -> int:
     start_time = time.time()
     liked_success = False
     skipped_app_only = False
+    skipped_already = False
     error_count_like = 0
     try:
         if config.verbose:
@@ -856,6 +939,9 @@ async def cmd_like(config: BotConfig, url: str) -> int:
         except AppOnlyNoteError as e:
             print("Skipped (app-only):", url)
             skipped_app_only = True
+        except AlreadyLikedError:
+            print("Skipped (already-liked):", url)
+            skipped_already = True
         except Exception:
             print("Error while liking:", url)
             error_count_like += 1
@@ -868,7 +954,7 @@ async def cmd_like(config: BotConfig, url: str) -> int:
             except Exception:
                 pass
     duration = time.time() - start_time
-    print(f"[{now_ts()}] Stats: total=1, liked={1 if liked_success else 0}, skipped_app_only={1 if skipped_app_only else 0}, errors={error_count_like}, duration_sec={duration:.2f}")
+    print(f"[{now_ts()}] Stats: total=1, liked={1 if liked_success else 0}, skipped_app_only={1 if skipped_app_only else 0}, skipped_already={1 if skipped_already else 0}, errors={error_count_like}, duration_sec={duration:.2f}")
     return 0
 
 
@@ -898,6 +984,7 @@ async def cmd_batch(config: BotConfig, manifest_path: str) -> int:
     total_actions = 0
     liked_count = 0
     skipped_app_only = 0
+    skipped_already = 0
     error_count = 0
     try:
         for action in actions:
@@ -915,6 +1002,9 @@ async def cmd_batch(config: BotConfig, manifest_path: str) -> int:
                 except AppOnlyNoteError:
                     print("Skipped (app-only):", url)
                     skipped_app_only += 1
+                except AlreadyLikedError:
+                    print("Skipped (already-liked):", url)
+                    skipped_already += 1
                 except Exception:
                     print("Error while liking:", url)
                     error_count += 1
@@ -930,7 +1020,7 @@ async def cmd_batch(config: BotConfig, manifest_path: str) -> int:
             total_actions += 1
             await asyncio.sleep(delay_ms / 1000.0)
         duration = time.time() - start_time
-        print(f"[{now_ts()}] Stats: total_actions={total_actions}, liked={liked_count}, skipped_app_only={skipped_app_only}, errors={error_count}, duration_sec={duration:.2f}")
+        print(f"[{now_ts()}] Stats: total_actions={total_actions}, liked={liked_count}, skipped_app_only={skipped_app_only}, skipped_already={skipped_already}, errors={error_count}, duration_sec={duration:.2f}")
     finally:
         try:
             await context.close()
