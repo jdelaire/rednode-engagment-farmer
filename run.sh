@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Configurable ENV with defaults (override by exporting before calling or inline: KEYWORD="yoga" ./run.sh)
 KEYWORD="${KEYWORD:-crossfit}"
-LIMIT="${LIMIT:-50}"
+LIMIT="${LIMIT:-60}"
 DELAY_MS="${DELAY_MS:-1800}"
 DELAY_JITTER_PCT="${DELAY_JITTER_PCT:-40}"
 DELAY_MODEL="${DELAY_MODEL:-gauss}"
