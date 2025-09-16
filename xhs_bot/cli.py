@@ -646,7 +646,8 @@ async def _maybe_select_latest_tab(page: Page) -> None:
         # Consider it opened if we can see the filter panel overlay
         if not opened:
             try:
-                pnl = await page.wait_for_selector(".filter-panel", timeout=600)
+                # New UI overlay container
+                pnl = await page.wait_for_selector(".filter-panel, .filter-container", timeout=600)
                 opened = pnl is not None
             except Exception:
                 pass
@@ -654,7 +655,7 @@ async def _maybe_select_latest_tab(page: Page) -> None:
         if opened:
             # Prefer clicking inside overlay if present
             try:
-                overlay = await page.query_selector(".filter-panel")
+                overlay = await page.query_selector(".filter-panel, .filter-container")
             except Exception:
                 overlay = None
             if overlay:
@@ -664,12 +665,48 @@ async def _maybe_select_latest_tab(page: Page) -> None:
                     ".filter-panel a:has-text('最新')",
                     ".filter-panel div:has-text('最新')",
                     ".filter-panel span:has-text('最新')",
+                    ".filter-container .filters-wrapper button:has-text('最新')",
+                    ".filter-container .filters-wrapper [role='button']:has-text('最新')",
+                    ".filter-container .filters-wrapper a:has-text('最新')",
+                    ".filter-container .filters-wrapper div:has-text('最新')",
+                    ".filter-container .filters-wrapper span:has-text('最新')",
+                    ".filter-container .filters :has-text('最新')",
                 ]:
                     try:
                         el = await page.wait_for_selector(selector, timeout=800)
                         if el:
                             await el.click()
                             await page.wait_for_timeout(600)
+                            # If there is a confirm/apply area, click it
+                            try:
+                                for csel in [
+                                    ".filter-container .operation-container button:has-text('确认')",
+                                    ".filter-container .operation-container button:has-text('确定')",
+                                    ".filter-container .operation-container button:has-text('完成')",
+                                    ".filter-container .operation-container button:has-text('应用')",
+                                    ".filter-container .operation-container [role='button']:has-text('确认')",
+                                    ".filter-container .operation-container [role='button']:has-text('确定')",
+                                    ".filter-container .operation-container [role='button']:has-text('完成')",
+                                    ".filter-container .operation-container [role='button']:has-text('应用')",
+                                ]:
+                                    try:
+                                        btn = await page.wait_for_selector(csel, timeout=500)
+                                        if btn:
+                                            await btn.click()
+                                            await page.wait_for_timeout(500)
+                                            break
+                                    except Exception:
+                                        continue
+                            except Exception:
+                                pass
+                            # Try to close overlay if still present
+                            try:
+                                shadow = await page.query_selector('.filter-container .shadow')
+                                if shadow:
+                                    await shadow.click()
+                                    await page.wait_for_timeout(300)
+                            except Exception:
+                                pass
                             return
                     except Exception:
                         continue
