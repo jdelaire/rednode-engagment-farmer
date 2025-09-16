@@ -710,6 +710,78 @@ async def _maybe_select_latest_tab(page: Page) -> None:
                             return
                     except Exception:
                         continue
+                # Structural fallback: find 排序依据 section and pick the 最新 tag (or the second tag)
+                try:
+                    clicked_struct = await page.evaluate(
+                        r"""
+                        () => {
+                          function isVisible(el) {
+                            if (!el) return false;
+                            const s = window.getComputedStyle(el);
+                            if (!s || s.visibility === 'hidden' || s.display === 'none') return false;
+                            const r = el.getBoundingClientRect();
+                            return r.width > 0 && r.height > 0;
+                          }
+                          const root = document.querySelector('.filter-container') || document.querySelector('.filter-panel') || document;
+                          const wrappers = Array.from(root.querySelectorAll('.filters-wrapper, .filters'));
+                          let targetBlock = null;
+                          for (const block of wrappers) {
+                            const label = block.querySelector('span, .label, .title');
+                            const txt = label ? (label.textContent || '').trim() : '';
+                            if (txt && txt.includes('排序依据')) { targetBlock = block; break; }
+                          }
+                          const container = (targetBlock && (targetBlock.querySelector('.tag-container') || targetBlock)) || root.querySelector('.tag-container');
+                          if (!container) return false;
+                          const tags = Array.from(container.querySelectorAll('.tags'));
+                          if (!tags.length) return false;
+                          let pick = null;
+                          // Prefer text match 最新
+                          for (const t of tags) {
+                            const ttxt = (t.innerText || t.textContent || '').trim();
+                            if (/最新/.test(ttxt)) { pick = t; break; }
+                          }
+                          // Else second tag heuristic if available
+                          if (!pick && tags.length > 1) {
+                            pick = tags[1];
+                          }
+                          // Else any non-active tag
+                          if (!pick) {
+                            pick = tags.find(t => !t.classList.contains('active')) || tags[0];
+                          }
+                          if (pick && isVisible(pick)) {
+                            pick.click();
+                            return true;
+                          }
+                          return false;
+                        }
+                        """
+                    )
+                    if clicked_struct:
+                        try:
+                            for csel in [
+                                ".filter-container .operation-container button",
+                                ".filter-container .operation-container [role='button']",
+                            ]:
+                                try:
+                                    btn = await page.wait_for_selector(csel, timeout=400)
+                                    if btn:
+                                        await btn.click()
+                                        await page.wait_for_timeout(400)
+                                        break
+                                except Exception:
+                                    continue
+                        except Exception:
+                            pass
+                        try:
+                            shadow = await page.query_selector('.filter-container .shadow')
+                            if shadow:
+                                await shadow.click()
+                                await page.wait_for_timeout(300)
+                        except Exception:
+                            pass
+                        return
+                except Exception:
+                    pass
             # Fallback: global text click if overlay-based selectors failed
             try:
                 if await _click_visible_text_as_button("最新"):
