@@ -522,7 +522,9 @@ async def _maybe_select_latest_tab(page: Page) -> None:
 
     UI variants observed:
     1) A visible tab/button labeled 最新 on the results page
-    2) 最新 option inside a right-side filter panel opened via a 按钮 labeled 筛选
+    2) 最新 option inside a right-side filter panel opened via a control labeled 筛选/已筛选
+       where the opener can be a div with class "filter" and the overlay container
+       has class "filter-panel".
 
     We try direct click first, then open the filter and click 最新. All actions are
     wrapped as best-effort so failures won't break the flow.
@@ -595,8 +597,9 @@ async def _maybe_select_latest_tab(page: Page) -> None:
         except Exception:
             pass
 
-    # 2) If not found, open the filter (筛选) panel, then click 最新 inside it
+    # 2) If not found, open the filter (筛选/已筛选) panel, then click 最新 inside it
     try:
+        # Try common opener labels first
         opened = await _click_visible_text_as_button("筛选")
         if not opened:
             # Additional attempts via common selectors
@@ -614,10 +617,68 @@ async def _maybe_select_latest_tab(page: Page) -> None:
                         break
                 except Exception:
                     continue
+        # If still not opened, try the new UI variant: a div.filter that shows 已筛选
+        if not opened:
+            try:
+                # Click on text label 已筛选 if visible
+                opened = await _click_visible_text_as_button("已筛选")
+            except Exception:
+                opened = False
+        if not opened:
+            # Try clicking typical filter icon/containers
+            for fsel in [
+                "div.filter",
+                "div.filter.active",
+                ".filter .filter-icon",
+                ".filter-icon",
+                ".reds-icon.filter-icon",
+                "[class*='filter']:has(svg)",
+            ]:
+                try:
+                    el = await page.wait_for_selector(fsel, timeout=800)
+                    if el:
+                        await el.click()
+                        await page.wait_for_timeout(500)
+                        opened = True
+                        break
+                except Exception:
+                    continue
+        # Consider it opened if we can see the filter panel overlay
+        if not opened:
+            try:
+                pnl = await page.wait_for_selector(".filter-panel", timeout=600)
+                opened = pnl is not None
+            except Exception:
+                pass
         # With the panel open, click 最新
         if opened:
-            if await _click_visible_text_as_button("最新"):
-                return
+            # Prefer clicking inside overlay if present
+            try:
+                overlay = await page.query_selector(".filter-panel")
+            except Exception:
+                overlay = None
+            if overlay:
+                for selector in [
+                    ".filter-panel button:has-text('最新')",
+                    ".filter-panel [role='button']:has-text('最新')",
+                    ".filter-panel a:has-text('最新')",
+                    ".filter-panel div:has-text('最新')",
+                    ".filter-panel span:has-text('最新')",
+                ]:
+                    try:
+                        el = await page.wait_for_selector(selector, timeout=800)
+                        if el:
+                            await el.click()
+                            await page.wait_for_timeout(600)
+                            return
+                    except Exception:
+                        continue
+            # Fallback: global text click if overlay-based selectors failed
+            try:
+                if await _click_visible_text_as_button("最新"):
+                    return
+            except Exception:
+                pass
             # Fallback via selectors inside overlay
             for selector in [
                 "div[role='dialog'] button:has-text('最新')",
