@@ -6,7 +6,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Configurable ENV with defaults (override by exporting before calling or inline: KEYWORD="yoga" ./run.sh)
 KEYWORD="${KEYWORD:-crossfit}"
-LIMIT="${LIMIT:-70}"
+LIMIT="${LIMIT:-100}"
+SLOW_MS="${SLOW_MS:-50}"
 DELAY_MS="${DELAY_MS:-1800}"
 DELAY_JITTER_PCT="${DELAY_JITTER_PCT:-40}"
 DELAY_MODEL="${DELAY_MODEL:-gauss}"
@@ -25,10 +26,16 @@ HUMAN_IDLE_MIN_S="${HUMAN_IDLE_MIN_S:-1.5}"
 HUMAN_IDLE_MAX_S="${HUMAN_IDLE_MAX_S:-4.5}"
 MOUSE_WIGGLE_PROB="${MOUSE_WIGGLE_PROB:-0.4}"
 USER_DATA="${USER_DATA:-${SCRIPT_DIR}/LoginInfo}"
+USER_AGENT="${USER_AGENT:-}"
 ACCEPT_LANGUAGE="${ACCEPT_LANGUAGE:-}"
 TIMEZONE_ID="${TIMEZONE_ID:-}"
 VIEWPORT_W="${VIEWPORT_W:-}"
 VIEWPORT_H="${VIEWPORT_H:-}"
+
+if [[ -z "${KEYWORD// }" ]]; then
+  echo "KEYWORD must be set (e.g. KEYWORD=\"yoga\" ./run.sh)" >&2
+  exit 1
+fi
 
 # Optional flags: set to non-empty to enable; leave empty to omit
 HEADLESS="${HEADLESS:-}"
@@ -47,6 +54,7 @@ fi
 
 xhs-bot like-latest "$KEYWORD" \
   --limit "$LIMIT" \
+  --slow "$SLOW_MS" \
   --delay-ms "$DELAY_MS" \
   --delay-jitter-pct "$DELAY_JITTER_PCT" \
   --delay-model "$DELAY_MODEL" \
@@ -65,11 +73,12 @@ xhs-bot like-latest "$KEYWORD" \
   --human-idle-max-s "$HUMAN_IDLE_MAX_S" \
   --mouse-wiggle-prob "$MOUSE_WIGGLE_PROB" \
   ${VERBOSE:+--verbose} \
-$( [[ "$PERSON_DETECTION" == "0" ]] && printf '%s' "--no-person-detection" ) \
+  $( [[ "$PERSON_DETECTION" == "0" ]] && printf '%s' "--no-person-detection" ) \
   ${HEADLESS:+--headless} \
   ${NO_RANDOM_UA:+--no-random-ua} \
   ${NO_RANDOM_ORDER:+--no-random-order} \
   ${NO_STEALTH:+--no-stealth} \
+  ${USER_AGENT:+--user-agent "$USER_AGENT"} \
   ${ACCEPT_LANGUAGE:+--accept-language "$ACCEPT_LANGUAGE"} \
   ${TIMEZONE_ID:+--timezone-id "$TIMEZONE_ID"} \
   ${VIEWPORT_W:+--viewport-w "$VIEWPORT_W"} \
