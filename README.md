@@ -48,10 +48,13 @@ Global flags
 - `--like-prob <0..1>` / `--hover-prob <0..1>`: Control how many cards are liked and whether to hover before clicking
 - `--ramp-up-s`, `--long-pause-prob`, `--long-pause-min-s`, `--long-pause-max-s`: Pace controls for slow starts and occasional breaks
 - `--session-cap-min`, `--session-cap-max`: Soft range for the number of likes in a run
-- `--user-agent`, `--accept-language`, `--timezone-id`: Browser fingerprint overrides
+- `--user-agent`, `--accept-language`, `--timezone-id`: Browser fingerprint overrides (user-agent rotates automatically unless `--no-random-ua` is set)
 - `--viewport-w`, `--viewport-h`: Fix viewport size; omit to keep random sizing
 - `--no-stealth`: Disable stealth tweaks (Playwright exposes `navigator.webdriver`)
 - `--no-random-order`: Process cards in the order they appear
+- `--no-random-ua`: Pin the default Chromium user-agent instead of rotating per run
+- `--human-idle-prob`, `--human-idle-min-s`, `--human-idle-max-s`: Control human-style pauses between interactions
+- `--mouse-wiggle-prob`: Chance to wiggle the cursor during idle pauses
 - `--verbose`: Print progress logs for each like
 
 Notes
@@ -63,6 +66,8 @@ Notes
 - If a note is already liked or Playwright cannot find the icon, the entry is skipped and the script continues.
 - Some notes are app-only on web and show an overlay like "当前笔记暂时无法浏览". These are detected and skipped automatically.
 - The bot prioritizes cards with fewer than 10 likes first (based on the count shown on each card), then processes the rest according to your randomization settings.
+- Each run randomizes viewport size and, by default, rotates between a small set of desktop user-agents and inserts human-style reading pauses to lower automation fingerprints.
+- At the end of a session the CLI emits a JSON summary with counts for liked/skipped posts and a reason breakdown (e.g., `"unchanged"`, `"error:TimeoutError"`). Capture this output when tuning heuristics.
 
 Contributing
 ------------

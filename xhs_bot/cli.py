@@ -3,7 +3,7 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, Optional, Tuple, cast
 import random
 import time
 from datetime import datetime
@@ -20,6 +20,14 @@ DEFAULT_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/126.0.0.0 Safari/537.36"
 )
+
+COMMON_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.114 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.76 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.118 Safari/537.36",
+]
 
 
 def now_ts() -> str:
@@ -53,6 +61,11 @@ class BotConfig:
     timezone_id: Optional[str] = None
     session_cap_min: int = 0
     session_cap_max: int = 0
+    randomize_user_agent: bool = True
+    human_idle_prob: float = 0.25
+    human_idle_min_s: float = 1.5
+    human_idle_max_s: float = 4.5
+    mouse_wiggle_prob: float = 0.4
 
 
 async def create_context(config: BotConfig) -> tuple[Playwright, BrowserContext]:
@@ -145,6 +158,34 @@ def draw_delay_seconds(base_delay_ms: int, jitter_pct: int, model: str) -> float
     return compute_jittered_delay_seconds(base_delay_ms, jitter_pct)
 
 
+async def maybe_idle_like_human(page: Page, config: BotConfig) -> None:
+    try:
+        prob = max(0.0, min(1.0, config.human_idle_prob))
+        if prob <= 0:
+            return
+        if random.random() > prob:
+            return
+        sleep_min = max(0.2, config.human_idle_min_s)
+        sleep_max = max(sleep_min, config.human_idle_max_s)
+        viewport = page.viewport_size
+        if viewport:
+            wiggle_prob = max(0.0, min(1.0, config.mouse_wiggle_prob))
+            if random.random() <= wiggle_prob:
+                try:
+                    base_x = random.uniform(viewport["width"] * 0.15, viewport["width"] * 0.85)
+                    base_y = random.uniform(viewport["height"] * 0.20, viewport["height"] * 0.90)
+                    await page.mouse.move(base_x, base_y, steps=random.randint(8, 18))
+                    if random.random() < 0.5:
+                        drift_x = base_x + random.uniform(-35, 35)
+                        drift_y = base_y + random.uniform(-20, 40)
+                        await page.mouse.move(drift_x, drift_y, steps=random.randint(4, 10))
+                except Exception:
+                    pass
+        await asyncio.sleep(random.uniform(sleep_min, sleep_max))
+    except Exception:
+        pass
+
+
 async def like_latest_from_search(
     context: BrowserContext,
     config: BotConfig,
@@ -152,7 +193,7 @@ async def like_latest_from_search(
     limit: int = 10,
     search_type: str = "51",
     duration_sec: Optional[int] = None,
-) -> List[Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     page = context.pages[0] if context.pages else await context.new_page()
     base_url = "https://www.xiaohongshu.com"
     search_url = f"{base_url}/search_result/?keyword={quote_plus(keyword)}&source=web_explore_feed&type={search_type}"
@@ -161,6 +202,7 @@ async def like_latest_from_search(
     start_ts = time.monotonic()
 
     liked_items: List[Dict[str, Any]] = []
+    skipped_items: List[Dict[str, Any]] = []
     seen_explore_ids: set[str] = set()
     session_like_target = limit
 
@@ -284,6 +326,7 @@ async def like_latest_from_search(
                 if config.verbose:
                     lc_repr = info.get("likeCount")
                     print(f"Liking: {url} (likes={lc_repr})")
+                await maybe_idle_like_human(page, config)
                 await maybe_hover_element(page, like_target, config.hover_prob)
                 await like_target.click()
                 try:
@@ -309,9 +352,23 @@ async def like_latest_from_search(
                 else:
                     if config.verbose:
                         print(f"Skipped (already-liked or unchanged): {url}")
+                    skipped_items.append(
+                        {
+                            "url": url,
+                            "title": info.get("title", ""),
+                            "reason": "unchanged",
+                        }
+                    )
                 if len(liked_items) >= session_like_target:
                     break
-            except Exception:
+            except Exception as exc:
+                skipped_items.append(
+                    {
+                        "url": url,
+                        "title": info.get("title", ""),
+                        "reason": f"error:{exc.__class__.__name__}",
+                    }
+                )
                 continue
         if len(liked_items) == last_liked_count and not progress:
             idle_rounds += 1
@@ -341,7 +398,7 @@ async def like_latest_from_search(
             await asyncio.sleep(random.uniform(30.0, 90.0))
             break
 
-    return liked_items[:session_like_target]
+    return liked_items[:session_like_target], skipped_items
 
 
 async def cmd_like_latest(
@@ -356,7 +413,7 @@ async def cmd_like_latest(
     start_time = time.time()
     try:
         duration_sec = duration_min * 60 if duration_min > 0 else None
-        liked = await like_latest_from_search(
+        liked, skipped = await like_latest_from_search(
             context,
             config,
             keyword,
@@ -376,7 +433,20 @@ async def cmd_like_latest(
                 draw_delay_seconds(base_delay, config.delay_jitter_pct, config.delay_model)
             )
         duration = time.time() - start_time
-        print(f"[{now_ts()}] Stats: total_liked={len(liked)}, duration_sec={duration:.2f}")
+        total_attempted = len(liked) + len(skipped)
+        from collections import Counter
+
+        skip_reasons = Counter(item.get("reason", "unknown") for item in skipped)
+        summary = {
+            "ts": now_ts(),
+            "keyword": keyword,
+            "liked": len(liked),
+            "skipped": len(skipped),
+            "attempted": total_attempted,
+            "duration_sec": round(duration, 2),
+            "skip_breakdown": dict(skip_reasons),
+        }
+        print(f"[{summary['ts']}] Summary: {json.dumps(summary, ensure_ascii=False)}")
     finally:
         try:
             await context.close()
@@ -420,6 +490,11 @@ def parse_args(argv: List[str]) -> tuple[BotConfig, Any]:
     parser.add_argument("--viewport-h", dest="viewport_h", type=int, help="Fixed viewport height")
     parser.add_argument("--no-stealth", dest="stealth", action="store_false", default=True, help="Disable stealth init scripts")
     parser.add_argument("--no-random-order", dest="random_order", action="store_false", help="Disable randomization of processing order")
+    parser.add_argument("--no-random-ua", dest="randomize_user_agent", action="store_false", default=True, help="Disable automatic user-agent rotation")
+    parser.add_argument("--human-idle-prob", dest="human_idle_prob", type=float, default=0.25, help="Chance to pause like a human between cards")
+    parser.add_argument("--human-idle-min-s", dest="human_idle_min_s", type=float, default=1.5, help="Minimum pause length when idling")
+    parser.add_argument("--human-idle-max-s", dest="human_idle_max_s", type=float, default=4.5, help="Maximum pause length when idling")
+    parser.add_argument("--mouse-wiggle-prob", dest="mouse_wiggle_prob", type=float, default=0.4, help="Chance to wiggle the cursor during human idle pauses")
     parser.add_argument("--verbose", action="store_true", help="Print verbose progress output")
 
     ns = parser.parse_args(argv)
@@ -430,12 +505,16 @@ def parse_args(argv: List[str]) -> tuple[BotConfig, Any]:
     if viewport_w and viewport_h:
         random_viewport = False
 
+    user_agent = ns.user_agent
+    if ns.randomize_user_agent and not ns.user_agent:
+        user_agent = random.choice(COMMON_USER_AGENTS)
+
     config = BotConfig(
         user_data_dir=ns.user_data_dir,
         headless=ns.headless,
         slow_mo_ms=ns.slow_mo_ms,
         verbose=ns.verbose,
-        user_agent=ns.user_agent,
+        user_agent=user_agent,
         delay_jitter_pct=ns.delay_jitter_pct,
         hover_prob=ns.hover_prob,
         stealth=ns.stealth,
@@ -455,6 +534,11 @@ def parse_args(argv: List[str]) -> tuple[BotConfig, Any]:
         timezone_id=ns.timezone_id,
         session_cap_min=ns.session_cap_min,
         session_cap_max=ns.session_cap_max,
+        randomize_user_agent=ns.randomize_user_agent,
+        human_idle_prob=ns.human_idle_prob,
+        human_idle_min_s=ns.human_idle_min_s,
+        human_idle_max_s=ns.human_idle_max_s,
+        mouse_wiggle_prob=ns.mouse_wiggle_prob,
     )
     return config, ns
 
