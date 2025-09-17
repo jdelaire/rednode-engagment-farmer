@@ -13,6 +13,8 @@ from urllib.parse import quote_plus
 
 from playwright.async_api import async_playwright, BrowserContext, Page, Playwright
 
+from .person_detector import DetectionResult, detect_person, data_url_to_bytes
+
 
 DEFAULT_USER_DATA_DIR = str(Path.home() / ".xhs_bot" / "user_data")
 DEFAULT_USER_AGENT = (
@@ -66,6 +68,7 @@ class BotConfig:
     human_idle_min_s: float = 1.5
     human_idle_max_s: float = 4.5
     mouse_wiggle_prob: float = 0.4
+    detect_person: bool = True
 
 
 async def create_context(config: BotConfig) -> tuple[Playwright, BrowserContext]:
@@ -186,6 +189,140 @@ async def maybe_idle_like_human(page: Page, config: BotConfig) -> None:
         pass
 
 
+async def _fetch_note_preview_bytes(page: Page, note) -> Optional[bytes]:
+    try:
+        img_handle = await note.query_selector("img")
+        if not img_handle:
+            return None
+        try:
+            # Element screenshots avoid cross-origin fetch/CORS issues for preview thumbs.
+            return await img_handle.screenshot(type="png")
+        except Exception:
+            pass
+        src = await img_handle.get_attribute("src")
+        if not src:
+            return None
+        if src.startswith("data:"):
+            return data_url_to_bytes(src)
+        data = await page.evaluate(
+            """async (url) => {
+              try {
+                const res = await fetch(url, { credentials: 'omit' });
+                if (!res.ok) return null;
+                const buf = await res.arrayBuffer();
+                return Array.from(new Uint8Array(buf));
+              } catch (e) {
+                return null;
+              }
+            }
+            """,
+            src,
+        )
+        if not data:
+            return None
+        return bytes(data)
+    except Exception:
+        return None
+
+
+async def _ensure_note_handle(page: Page, note, info: Dict[str, Any]):
+    """Return a fresh note handle if the original became detached."""
+    try:
+        if note and await page.evaluate("(node) => !!(node && node.isConnected)", note):
+            return note
+    except Exception:
+        pass
+
+    target_url = info.get("exploreHref") or ""
+    if not target_url:
+        return None
+    note_id = target_url.rstrip("/").split("/")[-1]
+    if not note_id:
+        return None
+
+    try:
+        anchor = await page.query_selector(f'section.note-item a[href*="{note_id}"]')
+        if not anchor:
+            return None
+        closest = await anchor.evaluate_handle("el => el.closest('section.note-item')")
+        if closest:
+            return closest.as_element()
+    except Exception:
+        return None
+    return None
+
+
+async def _detect_block_state(page: Page) -> str:
+    try:
+        current_url = page.url
+        if current_url and any(
+            token in current_url.lower() for token in ["login", "passport", "signin"]
+        ):
+            return "login-required"
+    except Exception:
+        pass
+
+    try:
+        result = await page.evaluate(  # type: ignore
+            """
+            () => {
+              const bodyText = document.body ? document.body.innerText : '';
+              const lower = bodyText.toLowerCase();
+              const rateMarkers = ['操作频繁','行为异常','验证','验证码','verify','captcha','限制'];
+              const loginMarkers = ['登录','登入','登陆','帳號','账号','sign in','log in','login','手机号','手机登录','手机登錄'];
+              let rateHit = false;
+              for (const token of rateMarkers) {
+                if (!token) continue;
+                if (bodyText.includes(token) || lower.includes(token.toLowerCase())) {
+                  rateHit = true;
+                  break;
+                }
+              }
+              let loginHit = false;
+              for (const token of loginMarkers) {
+                if (!token) continue;
+                if (bodyText.includes(token) || lower.includes(token.toLowerCase())) {
+                  loginHit = true;
+                  break;
+                }
+              }
+              const hasPassword = !!document.querySelector('input[type="password"], input[name*="password" i]');
+              const hasPhone = !!document.querySelector('input[type="tel"], input[name*="phone" i]');
+              const hasLoginContainer = !!document.querySelector(
+                '.login-container, .login-wrapper, .passport-container, [class*="passport" i], [class*="login" i]'
+              );
+              return {
+                rateHit,
+                loginHit,
+                hasPassword,
+                hasPhone,
+                hasLoginContainer,
+                bodyLength: bodyText.length,
+              };
+            }
+            """
+        )
+    except Exception:
+        return "none"
+
+    if not result:
+        return "none"
+
+    try:
+        login_signal = bool(
+            result.get("hasPassword")
+            or result.get("hasPhone")
+            or result.get("hasLoginContainer")
+        )
+        if result.get("loginHit") and login_signal:
+            return "login-required"
+        if result.get("rateHit"):
+            return "rate-limit"
+    except Exception:
+        return "none"
+    return "none"
+
+
 async def like_latest_from_search(
     context: BrowserContext,
     config: BotConfig,
@@ -193,7 +330,7 @@ async def like_latest_from_search(
     limit: int = 10,
     search_type: str = "51",
     duration_sec: Optional[int] = None,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
     page = context.pages[0] if context.pages else await context.new_page()
     base_url = "https://www.xiaohongshu.com"
     search_url = f"{base_url}/search_result/?keyword={quote_plus(keyword)}&source=web_explore_feed&type={search_type}"
@@ -204,6 +341,8 @@ async def like_latest_from_search(
     liked_items: List[Dict[str, Any]] = []
     skipped_items: List[Dict[str, Any]] = []
     seen_explore_ids: set[str] = set()
+    session_state: Dict[str, Any] = {"block_state": "ok"}
+    session_expired_logged = False
     session_like_target = limit
 
     async def extract_note_info(note_handle) -> Dict[str, Any]:
@@ -257,16 +396,6 @@ async def like_latest_from_search(
         if config.verbose:
             print(f"Session like target: {session_like_target}")
 
-    async def _is_rate_limited() -> bool:
-        try:
-            txt = await page.evaluate("() => document.body ? document.body.innerText : ''")
-            if not txt:
-                return False
-            patterns = ["操作频繁", "行为异常", "验证", "验证码", "verify", "captcha", "限制"]
-            return any(p in txt for p in patterns)
-        except Exception:
-            return False
-
     spacing_sec = None
     if duration_sec and session_like_target > 0:
         spacing_sec = max(1.0, duration_sec / float(session_like_target))
@@ -274,6 +403,39 @@ async def like_latest_from_search(
 
     while len(liked_items) < session_like_target and idle_rounds < 8 and max_rounds > 0:
         max_rounds -= 1
+        block_state = await _detect_block_state(page)
+        if block_state == "login-required":
+            session_state.update(
+                {
+                    "block_state": "login-required",
+                    "message": "Session appears logged out; reauthenticate.",
+                }
+            )
+            if config.verbose:
+                print("Detected logged-out session. Please sign in again.")
+            if not session_expired_logged:
+                skipped_items.append(
+                    {
+                        "url": "",
+                        "title": "",
+                        "reason": "session-expired",
+                        "person": "unknown",
+                        "person_backend": None,
+                    }
+                )
+                session_expired_logged = True
+            break
+        if block_state == "rate-limit":
+            session_state.update(
+                {
+                    "block_state": "rate-limit",
+                    "message": "Rate limit or verification detected.",
+                }
+            )
+            if config.verbose:
+                print("Detected potential rate limit or verification. Backing off.")
+            await asyncio.sleep(random.uniform(30.0, 90.0))
+            break
         note_handles = await page.query_selector_all("section.note-item")
         candidates: List[tuple[Any, Dict[str, Any]]] = []
         for note in note_handles:
@@ -320,36 +482,94 @@ async def like_latest_from_search(
             if random.random() > max(0.0, min(1.0, config.like_prob)):
                 continue
             try:
-                like_target = await note.query_selector("span.like-wrapper, svg.like-icon, .like-wrapper .like-icon")
-                if like_target is None:
-                    continue
-                if config.verbose:
-                    lc_repr = info.get("likeCount")
-                    print(f"Liking: {url} (likes={lc_repr})")
-                await maybe_idle_like_human(page, config)
-                await maybe_hover_element(page, like_target, config.hover_prob)
-                await like_target.click()
-                try:
-                    await page.wait_for_function(
-                        "(note) => { const u = note.querySelector('svg.like-icon use'); return u && (u.getAttribute('xlink:href')||u.getAttribute('href')||'').includes('liked'); }",
-                        arg=note,
-                        timeout=2000,
-                    )
-                except Exception:
-                    pass
-                try:
-                    state_changed = await page.evaluate(
-                        "(note) => { const u = note.querySelector('svg.like-icon use'); const href = u ? (u.getAttribute('xlink:href')||u.getAttribute('href')||'') : ''; return href.toLowerCase().includes('liked'); }",
-                        note,
-                    )
-                except Exception:
-                    state_changed = False
-                if state_changed:
-                    liked_items.append({"url": url, "title": info.get("title", "")})
-                    progress = True
+                detection: Optional[DetectionResult] = None
+                if config.detect_person:
+                    img_bytes = await _fetch_note_preview_bytes(page, note)
+                    if img_bytes:
+                        detection = detect_person(img_bytes)
                     if config.verbose:
-                        print(f"[{now_ts()}] Liked: {url}")
-                else:
+                        if detection:
+                            detail = f"backend={detection.backend}"
+                            if detection.error:
+                                detail += f" err={detection.error}"
+                            print(f"Person detection for {url}: {detection.label} ({detail})")
+                        else:
+                            print(f"Person detection for {url}: unknown (no-bytes)")
+
+                note = await _ensure_note_handle(page, note, info) or note
+                attempts = 0
+                max_attempts = 3
+                last_exc: Optional[Exception] = None
+                dom_detached_failure = False
+
+                while attempts < max_attempts:
+                    like_target = await note.query_selector(
+                        "span.like-wrapper, svg.like-icon, .like-wrapper .like-icon"
+                    )
+                    if like_target is None:
+                        note = await _ensure_note_handle(page, note, info) or note
+                        attempts += 1
+                        await asyncio.sleep(0.1)
+                        continue
+
+                    if config.verbose:
+                        lc_repr = info.get("likeCount")
+                        print(f"Liking: {url} (likes={lc_repr})")
+
+                    try:
+                        await note.scroll_into_view_if_needed()
+                    except Exception:
+                        pass
+
+                    await maybe_idle_like_human(page, config)
+                    await maybe_hover_element(page, like_target, config.hover_prob)
+
+                    try:
+                        await like_target.click()
+                    except Exception as exc:
+                        last_exc = exc
+                        msg = str(exc).lower()
+                        if "not attached" in msg and attempts < max_attempts - 1:
+                            note = await _ensure_note_handle(page, note, info) or note
+                            dom_detached_failure = True
+                            attempts += 1
+                            await asyncio.sleep(random.uniform(0.1, 0.3))
+                            continue
+                        if "not attached" in msg:
+                            dom_detached_failure = True
+                        raise
+
+                    try:
+                        await page.wait_for_function(
+                            "(note) => { const u = note.querySelector('svg.like-icon use'); return u && (u.getAttribute('xlink:href')||u.getAttribute('href')||'').includes('liked'); }",
+                            arg=note,
+                            timeout=2000,
+                        )
+                    except Exception:
+                        pass
+
+                    try:
+                        state_changed = await page.evaluate(
+                            "(note) => { const u = note.querySelector('svg.like-icon use'); const href = u ? (u.getAttribute('xlink:href')||u.getAttribute('href')||'') : ''; return href.toLowerCase().includes('liked'); }",
+                            note,
+                        )
+                    except Exception:
+                        state_changed = False
+
+                    if state_changed:
+                        liked_items.append(
+                            {
+                                "url": url,
+                                "title": info.get("title", ""),
+                                "person": detection.label if detection else "unknown",
+                                "person_backend": detection.backend if detection else None,
+                            }
+                        )
+                        progress = True
+                        if config.verbose:
+                            print(f"[{now_ts()}] Liked: {url}")
+                        break
+
                     if config.verbose:
                         print(f"Skipped (already-liked or unchanged): {url}")
                     skipped_items.append(
@@ -357,23 +577,50 @@ async def like_latest_from_search(
                             "url": url,
                             "title": info.get("title", ""),
                             "reason": "unchanged",
+                            "person": detection.label if detection else "unknown",
+                            "person_backend": detection.backend if detection else None,
                         }
                     )
+
+                    if attempts == 0:
+                        note = await _ensure_note_handle(page, note, info) or note
+                        attempts += 1
+                        await asyncio.sleep(0.1)
+                        continue
+
+                    break
+
+                if attempts >= max_attempts and (not liked_items or liked_items[-1]["url"] != url):
+                    reason = "dom-detached" if dom_detached_failure else "unresolved"
+                    skipped_items.append(
+                        {
+                            "url": url,
+                            "title": info.get("title", ""),
+                            "reason": reason,
+                            "person": detection.label if detection else "unknown",
+                            "person_backend": detection.backend if detection else None,
+                        }
+                    )
+
                 if len(liked_items) >= session_like_target:
                     break
+
             except Exception as exc:
                 err_msg = str(exc)
                 if config.verbose:
                     print(
                         f"Error while liking {url}: {exc.__class__.__name__}: {err_msg}"
                     )
+                skip_reason = "dom-detached" if "not attached" in err_msg.lower() else "error"
                 skipped_items.append(
                     {
                         "url": url,
                         "title": info.get("title", ""),
-                        "reason": "error",
+                        "reason": skip_reason,
                         "error_type": exc.__class__.__name__,
                         "error_message": err_msg[:200],
+                        "person": detection.label if detection else "unknown",
+                        "person_backend": detection.backend if detection else None,
                     }
                 )
                 continue
@@ -399,13 +646,7 @@ async def like_latest_from_search(
             await asyncio.sleep(random.uniform(config.long_pause_min_s, config.long_pause_max_s))
         else:
             await asyncio.sleep(random.uniform(0.4, 1.1))
-        if await _is_rate_limited():
-            if config.verbose:
-                print("Detected potential rate limit or verification. Backing off.")
-            await asyncio.sleep(random.uniform(30.0, 90.0))
-            break
-
-    return liked_items[:session_like_target], skipped_items
+    return liked_items[:session_like_target], skipped_items, session_state
 
 
 async def cmd_like_latest(
@@ -420,7 +661,7 @@ async def cmd_like_latest(
     start_time = time.time()
     try:
         duration_sec = duration_min * 60 if duration_min > 0 else None
-        liked, skipped = await like_latest_from_search(
+        liked, skipped, session_state = await like_latest_from_search(
             context,
             config,
             keyword,
@@ -430,7 +671,8 @@ async def cmd_like_latest(
         )
         for item in liked:
             url = item.get("url", "")
-            print(f"[{now_ts()}] Liked: {url}")
+            person_label = item.get("person", "unknown")
+            print(f"[{now_ts()}] Liked: {url} (person={person_label})")
             elapsed = time.monotonic()
             base_delay = delay_ms
             if config.ramp_up_s > 0 and elapsed < config.ramp_up_s:
@@ -453,6 +695,7 @@ async def cmd_like_latest(
             for item in skipped
             if item.get("reason") == "error"
         ][:5]
+        person_counts = Counter(item.get("person", "unknown") for item in liked)
         summary = {
             "ts": now_ts(),
             "keyword": keyword,
@@ -462,6 +705,8 @@ async def cmd_like_latest(
             "duration_sec": round(duration, 2),
             "skip_breakdown": dict(skip_reasons),
             "error_examples": error_examples,
+            "person_detection": dict(person_counts),
+            "session_state": session_state,
         }
         print(f"[{summary['ts']}] Summary: {json.dumps(summary, ensure_ascii=False)}")
     finally:
@@ -472,6 +717,9 @@ async def cmd_like_latest(
                 await pw.stop()
             except Exception:
                 pass
+    if session_state.get("block_state") == "login-required":
+        print("Session ended because authentication expired. Sign in manually and rerun.")
+        return 1
     return 0
 
 
@@ -512,6 +760,7 @@ def parse_args(argv: List[str]) -> tuple[BotConfig, Any]:
     parser.add_argument("--human-idle-min-s", dest="human_idle_min_s", type=float, default=1.5, help="Minimum pause length when idling")
     parser.add_argument("--human-idle-max-s", dest="human_idle_max_s", type=float, default=4.5, help="Maximum pause length when idling")
     parser.add_argument("--mouse-wiggle-prob", dest="mouse_wiggle_prob", type=float, default=0.4, help="Chance to wiggle the cursor during human idle pauses")
+    parser.add_argument("--no-person-detection", dest="detect_person", action="store_false", default=True, help="Disable person detection before liking")
     parser.add_argument("--verbose", action="store_true", help="Print verbose progress output")
 
     ns = parser.parse_args(argv)
@@ -556,6 +805,7 @@ def parse_args(argv: List[str]) -> tuple[BotConfig, Any]:
         human_idle_min_s=ns.human_idle_min_s,
         human_idle_max_s=ns.human_idle_max_s,
         mouse_wiggle_prob=ns.mouse_wiggle_prob,
+        detect_person=ns.detect_person,
     )
     return config, ns
 

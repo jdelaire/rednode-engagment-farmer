@@ -20,6 +20,14 @@ pip install -e .
 playwright install chromium
 ```
 
+Person detection is enabled by default and uses OpenCV when available:
+
+```bash
+pip install opencv-python
+```
+
+Without OpenCV the detector falls back to `unknown` results but the bot continues to run.
+
 Usage
 -----
 
@@ -55,6 +63,7 @@ Global flags
 - `--no-random-ua`: Pin the default Chromium user-agent instead of rotating per run
 - `--human-idle-prob`, `--human-idle-min-s`, `--human-idle-max-s`: Control human-style pauses between interactions
 - `--mouse-wiggle-prob`: Chance to wiggle the cursor during idle pauses
+- `--no-person-detection`: Disable the default face/person detection step
 - `--verbose`: Print progress logs for each like
 
 Notes
@@ -67,7 +76,10 @@ Notes
 - Some notes are app-only on web and show an overlay like "当前笔记暂时无法浏览". These are detected and skipped automatically.
 - The bot prioritizes cards with fewer than 10 likes first (based on the count shown on each card), then processes the rest according to your randomization settings.
 - Each run randomizes viewport size and, by default, rotates between a small set of desktop user-agents and inserts human-style reading pauses to lower automation fingerprints.
-- At the end of a session the CLI emits a JSON summary with counts for liked/skipped posts, error breakdowns, and sample error details (type + message). Capture this output when tuning heuristics.
+- At the end of a session the CLI emits a JSON summary with counts for liked/skipped posts, error breakdowns, detected person tallies, the final `session_state`, and sample error details (type + message). Capture this output when tuning heuristics.
+- Person detection (enabled by default) leverages OpenCV Haar cascades. Install `opencv-python` (and ensure Playwright can fetch images) for this feature; otherwise detection falls back to `unknown`. Disable it with `--no-person-detection` or `PERSON_DETECTION=0` if needed.
+- Feed reflows occasionally detach card nodes mid-click; the bot retries up to three times and records a `dom-detached` skip if the element keeps disappearing so you can monitor instability.
+- If the browser session is no longer authenticated, the run stops early, prints a relogin hint, and exits with status code `1` so orchestrations can trigger manual sign-in.
 
 Contributing
 ------------
