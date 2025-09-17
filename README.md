@@ -67,7 +67,7 @@ Notes
 - Some notes are app-only on web and show an overlay like "当前笔记暂时无法浏览". These are detected and skipped automatically.
 - The bot prioritizes cards with fewer than 10 likes first (based on the count shown on each card), then processes the rest according to your randomization settings.
 - Each run randomizes viewport size and, by default, rotates between a small set of desktop user-agents and inserts human-style reading pauses to lower automation fingerprints.
-- At the end of a session the CLI emits a JSON summary with counts for liked/skipped posts and a reason breakdown (e.g., `"unchanged"`, `"error:TimeoutError"`). Capture this output when tuning heuristics.
+- At the end of a session the CLI emits a JSON summary with counts for liked/skipped posts, error breakdowns, and sample error details (type + message). Capture this output when tuning heuristics.
 
 Contributing
 ------------

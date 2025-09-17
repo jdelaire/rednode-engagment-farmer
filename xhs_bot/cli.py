@@ -362,11 +362,18 @@ async def like_latest_from_search(
                 if len(liked_items) >= session_like_target:
                     break
             except Exception as exc:
+                err_msg = str(exc)
+                if config.verbose:
+                    print(
+                        f"Error while liking {url}: {exc.__class__.__name__}: {err_msg}"
+                    )
                 skipped_items.append(
                     {
                         "url": url,
                         "title": info.get("title", ""),
-                        "reason": f"error:{exc.__class__.__name__}",
+                        "reason": "error",
+                        "error_type": exc.__class__.__name__,
+                        "error_message": err_msg[:200],
                     }
                 )
                 continue
@@ -437,6 +444,15 @@ async def cmd_like_latest(
         from collections import Counter
 
         skip_reasons = Counter(item.get("reason", "unknown") for item in skipped)
+        error_examples = [
+            {
+                "url": item.get("url"),
+                "error_type": item.get("error_type"),
+                "error_message": item.get("error_message"),
+            }
+            for item in skipped
+            if item.get("reason") == "error"
+        ][:5]
         summary = {
             "ts": now_ts(),
             "keyword": keyword,
@@ -445,6 +461,7 @@ async def cmd_like_latest(
             "attempted": total_attempted,
             "duration_sec": round(duration, 2),
             "skip_breakdown": dict(skip_reasons),
+            "error_examples": error_examples,
         }
         print(f"[{summary['ts']}] Summary: {json.dumps(summary, ensure_ascii=False)}")
     finally:
