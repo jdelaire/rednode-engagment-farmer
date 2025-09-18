@@ -40,7 +40,6 @@ fi
 # Optional flags: set to non-empty to enable; leave empty to omit
 HEADLESS="${HEADLESS:-}"
 VERBOSE="${VERBOSE:-1}"
-PERSON_DETECTION="${PERSON_DETECTION:-1}"
 NO_RANDOM_UA="${NO_RANDOM_UA:-}"
 NO_RANDOM_ORDER="${NO_RANDOM_ORDER:-}"
 NO_STEALTH="${NO_STEALTH:-}"
@@ -49,7 +48,6 @@ NO_STEALTH="${NO_STEALTH:-}"
 if ! command -v xhs-bot &> /dev/null; then
     echo "xhs-bot command not found. Creating and activating virtual environment..."
     python3 -m venv .venv && source .venv/bin/activate
-    pip3 install opencv-python-headless
 fi
 
 xhs-bot like-latest "$KEYWORD" \
@@ -73,7 +71,6 @@ xhs-bot like-latest "$KEYWORD" \
   --human-idle-max-s "$HUMAN_IDLE_MAX_S" \
   --mouse-wiggle-prob "$MOUSE_WIGGLE_PROB" \
   ${VERBOSE:+--verbose} \
-  $( [[ "$PERSON_DETECTION" == "0" ]] && printf '%s' "--no-person-detection" ) \
   ${HEADLESS:+--headless} \
   ${NO_RANDOM_UA:+--no-random-ua} \
   ${NO_RANDOM_ORDER:+--no-random-order} \

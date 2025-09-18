@@ -13,9 +13,6 @@ from urllib.parse import quote_plus
 
 from playwright.async_api import async_playwright, BrowserContext, Page, Playwright
 
-from .person_detector import DetectionResult, detect_person, data_url_to_bytes
-
-
 DEFAULT_USER_DATA_DIR = str(Path.home() / ".xhs_bot" / "user_data")
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -68,7 +65,6 @@ class BotConfig:
     human_idle_min_s: float = 1.5
     human_idle_max_s: float = 4.5
     mouse_wiggle_prob: float = 0.4
-    detect_person: bool = True
 
 
 async def create_context(config: BotConfig) -> tuple[Playwright, BrowserContext]:
@@ -189,42 +185,6 @@ async def maybe_idle_like_human(page: Page, config: BotConfig) -> None:
         pass
 
 
-async def _fetch_note_preview_bytes(page: Page, note) -> Optional[bytes]:
-    try:
-        img_handle = await note.query_selector("img")
-        if not img_handle:
-            return None
-        try:
-            # Element screenshots avoid cross-origin fetch/CORS issues for preview thumbs.
-            return await img_handle.screenshot(type="png")
-        except Exception:
-            pass
-        src = await img_handle.get_attribute("src")
-        if not src:
-            return None
-        if src.startswith("data:"):
-            return data_url_to_bytes(src)
-        data = await page.evaluate(
-            """async (url) => {
-              try {
-                const res = await fetch(url, { credentials: 'omit' });
-                if (!res.ok) return null;
-                const buf = await res.arrayBuffer();
-                return Array.from(new Uint8Array(buf));
-              } catch (e) {
-                return null;
-              }
-            }
-            """,
-            src,
-        )
-        if not data:
-            return None
-        return bytes(data)
-    except Exception:
-        return None
-
-
 async def _ensure_note_handle(page: Page, note, info: Dict[str, Any]):
     """Return a fresh note handle if the original became detached."""
     try:
@@ -336,6 +296,10 @@ async def like_latest_from_search(
     search_url = f"{base_url}/search_result/?keyword={quote_plus(keyword)}&source=web_explore_feed&type={search_type}"
     await page.goto(search_url, wait_until="domcontentloaded")
 
+    if config.verbose:
+        print("Waiting 60 seconds so you can switch filters before automation starts...")
+    await asyncio.sleep(60)
+
     start_ts = time.monotonic()
 
     liked_items: List[Dict[str, Any]] = []
@@ -419,8 +383,6 @@ async def like_latest_from_search(
                         "url": "",
                         "title": "",
                         "reason": "session-expired",
-                        "person": "unknown",
-                        "person_backend": None,
                     }
                 )
                 session_expired_logged = True
@@ -482,20 +444,6 @@ async def like_latest_from_search(
             if random.random() > max(0.0, min(1.0, config.like_prob)):
                 continue
             try:
-                detection: Optional[DetectionResult] = None
-                if config.detect_person:
-                    img_bytes = await _fetch_note_preview_bytes(page, note)
-                    if img_bytes:
-                        detection = detect_person(img_bytes)
-                    if config.verbose:
-                        if detection:
-                            detail = f"backend={detection.backend}"
-                            if detection.error:
-                                detail += f" err={detection.error}"
-                            print(f"Person detection for {url}: {detection.label} ({detail})")
-                        else:
-                            print(f"Person detection for {url}: unknown (no-bytes)")
-
                 note = await _ensure_note_handle(page, note, info) or note
                 attempts = 0
                 max_attempts = 3
@@ -561,8 +509,6 @@ async def like_latest_from_search(
                             {
                                 "url": url,
                                 "title": info.get("title", ""),
-                                "person": detection.label if detection else "unknown",
-                                "person_backend": detection.backend if detection else None,
                             }
                         )
                         progress = True
@@ -577,8 +523,6 @@ async def like_latest_from_search(
                             "url": url,
                             "title": info.get("title", ""),
                             "reason": "unchanged",
-                            "person": detection.label if detection else "unknown",
-                            "person_backend": detection.backend if detection else None,
                         }
                     )
 
@@ -597,8 +541,6 @@ async def like_latest_from_search(
                             "url": url,
                             "title": info.get("title", ""),
                             "reason": reason,
-                            "person": detection.label if detection else "unknown",
-                            "person_backend": detection.backend if detection else None,
                         }
                     )
 
@@ -619,8 +561,6 @@ async def like_latest_from_search(
                         "reason": skip_reason,
                         "error_type": exc.__class__.__name__,
                         "error_message": err_msg[:200],
-                        "person": detection.label if detection else "unknown",
-                        "person_backend": detection.backend if detection else None,
                     }
                 )
                 continue
@@ -671,8 +611,7 @@ async def cmd_like_latest(
         )
         for item in liked:
             url = item.get("url", "")
-            person_label = item.get("person", "unknown")
-            print(f"[{now_ts()}] Liked: {url} (person={person_label})")
+            print(f"[{now_ts()}] Liked: {url}")
             elapsed = time.monotonic()
             base_delay = delay_ms
             if config.ramp_up_s > 0 and elapsed < config.ramp_up_s:
@@ -695,7 +634,6 @@ async def cmd_like_latest(
             for item in skipped
             if item.get("reason") == "error"
         ][:5]
-        person_counts = Counter(item.get("person", "unknown") for item in liked)
         summary = {
             "ts": now_ts(),
             "keyword": keyword,
@@ -705,7 +643,6 @@ async def cmd_like_latest(
             "duration_sec": round(duration, 2),
             "skip_breakdown": dict(skip_reasons),
             "error_examples": error_examples,
-            "person_detection": dict(person_counts),
             "session_state": session_state,
         }
         print(f"[{summary['ts']}] Summary: {json.dumps(summary, ensure_ascii=False)}")
@@ -760,7 +697,6 @@ def parse_args(argv: List[str]) -> tuple[BotConfig, Any]:
     parser.add_argument("--human-idle-min-s", dest="human_idle_min_s", type=float, default=1.5, help="Minimum pause length when idling")
     parser.add_argument("--human-idle-max-s", dest="human_idle_max_s", type=float, default=4.5, help="Maximum pause length when idling")
     parser.add_argument("--mouse-wiggle-prob", dest="mouse_wiggle_prob", type=float, default=0.4, help="Chance to wiggle the cursor during human idle pauses")
-    parser.add_argument("--no-person-detection", dest="detect_person", action="store_false", default=True, help="Disable person detection before liking")
     parser.add_argument("--verbose", action="store_true", help="Print verbose progress output")
 
     ns = parser.parse_args(argv)
@@ -805,7 +741,6 @@ def parse_args(argv: List[str]) -> tuple[BotConfig, Any]:
         human_idle_min_s=ns.human_idle_min_s,
         human_idle_max_s=ns.human_idle_max_s,
         mouse_wiggle_prob=ns.mouse_wiggle_prob,
-        detect_person=ns.detect_person,
     )
     return config, ns
 
