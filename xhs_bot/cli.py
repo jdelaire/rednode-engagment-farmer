@@ -65,6 +65,15 @@ class BotConfig:
     human_idle_min_s: float = 1.5
     human_idle_max_s: float = 4.5
     mouse_wiggle_prob: float = 0.4
+    # Commenting (type-only by default)
+    comment_prob: float = 0.1
+    comment_max_per_session: int = 10
+    comment_min_interval_s: float = 300.0
+    comment_type_delay_min_ms: int = 60
+    comment_type_delay_max_ms: int = 140
+    comment_texts: Optional[List[str]] = None
+    comment_submit: bool = False  # default dry-run: type only, do not submit
+    comment_after_like_only: bool = True
 
 
 async def create_context(config: BotConfig) -> tuple[Playwright, BrowserContext]:
@@ -308,6 +317,10 @@ async def like_latest_from_search(
     session_state: Dict[str, Any] = {"block_state": "ok"}
     session_expired_logged = False
     session_like_target = limit
+    # comment session tracking (type-only by default)
+    comments_typed = 0
+    comment_attempts = 0
+    last_comment_time = 0.0
 
     async def extract_note_info(note_handle) -> Dict[str, Any]:
         data = await page.evaluate(
@@ -514,6 +527,36 @@ async def like_latest_from_search(
                         progress = True
                         if config.verbose:
                             print(f"[{now_ts()}] Liked: {url}")
+                        # Maybe type a comment after like (dry-run by default)
+                        if (
+                            config.comment_texts
+                            and len(config.comment_texts) > 0
+                            and comments_typed < max(0, config.comment_max_per_session)
+                        ):
+                            should_comment = random.random() <= max(0.0, min(1.0, config.comment_prob))
+                            now_t = time.monotonic()
+                            interval_ok = (now_t - last_comment_time) >= max(0.0, config.comment_min_interval_s)
+                            if should_comment and interval_ok:
+                                comment_attempts += 1
+                                comment_text = random.choice(config.comment_texts)
+                                if config.verbose:
+                                    preview = comment_text if len(comment_text) <= 160 else (comment_text[:160] + "...")
+                                    action = "submit" if config.comment_submit else "type (dry-run)"
+                                    print(f"[{now_ts()}] Preparing to {action} comment on {url}: {preview}")
+                                # Prefer opening via card cover click to preserve SPA context and tokens
+                                ok, reason = await try_open_and_type_comment_from_card(
+                                    context, page, note, url, comment_text, config
+                                )
+                                if ok:
+                                    comments_typed += 1
+                                    last_comment_time = time.monotonic()
+                                    if config.verbose:
+                                        preview2 = comment_text if len(comment_text) <= 160 else (comment_text[:160] + "...")
+                                        label = "Submitted" if config.comment_submit else "Typed (dry-run)"
+                                        print(f"[{now_ts()}] {label} comment on {url}: {preview2}")
+                                else:
+                                    if config.verbose:
+                                        print(f"[{now_ts()}] Comment skipped on {url}: {reason}")
                         break
 
                     if config.verbose:
@@ -586,7 +629,512 @@ async def like_latest_from_search(
             await asyncio.sleep(random.uniform(config.long_pause_min_s, config.long_pause_max_s))
         else:
             await asyncio.sleep(random.uniform(0.4, 1.1))
+    # record comment metrics
+    try:
+        session_state.setdefault("comments", {})
+        session_state["comments"].update(
+            {
+                "typed": comments_typed,
+                "attempts": comment_attempts,
+            }
+        )
+    except Exception:
+        pass
     return liked_items[:session_like_target], skipped_items, session_state
+
+
+async def _find_comment_input(page: Page):
+    # Scope strictly within the engage bar to avoid typing into global search bars
+    try:
+        engage = await page.query_selector('.interactions.engage-bar')
+    except Exception:
+        engage = None
+    if not engage:
+        return None
+    selectors = [
+        '#content-textarea.content-input[contenteditable="true"]',
+        'p#content-textarea[contenteditable="true"]',
+        '.input-box .content-edit #content-textarea',
+        '.content-edit [contenteditable="true"]',
+    ]
+    for sel in selectors:
+        try:
+            el = await engage.query_selector(sel)  # type: ignore
+            if el:
+                box = await el.bounding_box()
+                if box and box.get("width") and box.get("height"):
+                    return el
+        except Exception:
+            continue
+    return None
+
+
+async def _activate_comment_bar(page: Page) -> bool:
+    try:
+        eb = await page.query_selector('.interactions.engage-bar')
+        if not eb:
+            return False
+        try:
+            await eb.scroll_into_view_if_needed()
+        except Exception:
+            pass
+        # Prefer clicking the placeholder overlay if present
+        try:
+            placeholder = await eb.query_selector('.inner-when-not-active .inner')
+        except Exception:
+            placeholder = None
+        if placeholder:
+            try:
+                await maybe_hover_element(page, placeholder, hover_probability=0.4)
+                try:
+                    await placeholder.click()
+                except Exception:
+                    await placeholder.click(force=True)
+            except Exception:
+                pass
+        else:
+            # Click the content-edit area
+            try:
+                area = await eb.query_selector('.input-box .content-edit')
+            except Exception:
+                area = None
+            if area:
+                try:
+                    await maybe_hover_element(page, area, hover_probability=0.4)
+                    try:
+                        await area.click()
+                    except Exception:
+                        await area.click(force=True)
+                except Exception:
+                    pass
+            else:
+                # Try the chat icon wrapper as a last resort
+                try:
+                    chat = await eb.query_selector('.chat-wrapper')
+                    if chat:
+                        await maybe_hover_element(page, chat, hover_probability=0.3)
+                        await chat.click()
+                except Exception:
+                    pass
+        # Wait briefly for the right button area to appear
+        try:
+            await page.wait_for_selector('.interactions.engage-bar .right-btn-area', state='visible', timeout=1200)
+        except Exception:
+            pass
+        # Consider activation successful if input can be found or right-btn-area is visible
+        try:
+            rba = await page.query_selector('.interactions.engage-bar .right-btn-area')
+            if rba:
+                box = await rba.bounding_box()
+                if box and box.get('width') and box.get('height'):
+                    return True
+        except Exception:
+            pass
+        input_el = await _find_comment_input(page)
+        return input_el is not None
+    except Exception:
+        return False
+
+
+async def try_type_comment_on_note(
+    context: BrowserContext,
+    note_url: str,
+    text: str,
+    config: BotConfig,
+) -> Tuple[bool, str]:
+    page = await context.new_page()
+    try:
+        await page.goto(note_url, wait_until="domcontentloaded")
+        # quick block/state check
+        state = await _detect_block_state(page)
+        if state in {"login-required", "rate-limit"}:
+            return False, state
+        # Wait a bit for UI to settle
+        await asyncio.sleep(random.uniform(0.6, 1.6))
+        # Detect app-only or missing engage UI early
+        try:
+            flags = await page.evaluate(
+                """
+                () => {
+                  const bodyText = document.body ? document.body.innerText : '';
+                  const lower = bodyText.toLowerCase();
+                  const tokens = ['当前笔记暂时无法浏览','暂时无法浏览','打开app','去app','app内打开','下载app','open in app'];
+                  let appOnly = false;
+                  for (const t of tokens) {
+                    if (!t) continue;
+                    if (bodyText.includes(t) || lower.includes(t.toLowerCase())) { appOnly = true; break; }
+                  }
+                  const hasEngage = !!document.querySelector('.interactions.engage-bar');
+                  return { appOnly, hasEngage };
+                }
+                """
+            )
+        except Exception:
+            flags = {"appOnly": False, "hasEngage": False}
+        if (flags and (flags.get("appOnly") or not flags.get("hasEngage"))):
+            return False, "app-only"
+        # Activate the comment bar so buttons appear
+        if not await _activate_comment_bar(page):
+            return False, "no-activate"
+        # Try to find comment input
+        input_el = None
+        for _ in range(6):
+            input_el = await _find_comment_input(page)
+            if input_el:
+                break
+            await asyncio.sleep(0.5)
+        if not input_el:
+            return False, "no-input"
+        try:
+            await input_el.scroll_into_view_if_needed()
+        except Exception:
+            pass
+        await maybe_hover_element(page, input_el, hover_probability=0.7)
+        try:
+            await input_el.click()
+        except Exception:
+            try:
+                await input_el.click(force=True)
+            except Exception:
+                pass
+        # Ensure focus and reveal of submit/cancel controls
+        try:
+            await page.evaluate("el => el.focus()", input_el)
+        except Exception:
+            pass
+        try:
+            await page.wait_for_selector('.interactions.engage-bar .right-btn-area', state='visible', timeout=1500)
+        except Exception:
+            pass
+        ok, treason = await _type_into_comment_input(page, config, text)
+        if not ok:
+            return False, treason
+        # Submit if requested
+        if config.comment_submit:
+            await _submit_comment(page, input_el)
+        # Small pause to observe typed content
+        await asyncio.sleep(random.uniform(0.3, 0.8))
+        return True, "ok"
+    except Exception as exc:
+        return False, f"error:{exc.__class__.__name__}"
+    finally:
+        try:
+            await page.close()
+        except Exception:
+            pass
+
+
+async def try_open_and_type_comment_from_card(
+    context: BrowserContext,
+    page: Page,
+    note_handle,
+    note_url: str,
+    text: str,
+    config: BotConfig,
+) -> Tuple[bool, str]:
+    # Try clicking the cover image anchor inside the card to open the SPA overlay.
+    # Fall back to direct navigation if we cannot open from card.
+    try:
+        cover = None
+        for sel in [
+            'a.cover.mask.ld',
+            'a.cover.mask',
+            'a.cover',
+            'a[href^="/explore/"]',
+        ]:
+            try:
+                el = await note_handle.query_selector(sel)
+            except Exception:
+                el = None
+            if el:
+                cover = el
+                break
+        if cover:
+            try:
+                await cover.scroll_into_view_if_needed()
+            except Exception:
+                pass
+            await maybe_hover_element(page, cover, hover_probability=0.5)
+            # Simple click (SPA may open overlay). If it navigates, we handle below.
+            await cover.click()
+            # Wait briefly for overlay or navigation.
+            opened = False
+            try:
+                await page.wait_for_selector('.interactions.engage-bar, .note-container, #noteContainer', timeout=3000)
+                opened = True
+            except Exception:
+                # maybe navigated; check url change and re-detect
+                pass
+            if not opened:
+                try:
+                    await page.wait_for_load_state('domcontentloaded', timeout=2500)
+                except Exception:
+                    pass
+                # Re-check engage bar on current page
+                try:
+                    eb = await page.query_selector('.interactions.engage-bar')
+                    opened = bool(eb)
+                except Exception:
+                    opened = False
+            if opened:
+                # Now type comment within the same page (overlay)
+                # Reuse the scoped finder
+                input_el = None
+                for _ in range(8):
+                    input_el = await _find_comment_input(page)
+                    if input_el:
+                        break
+                    await asyncio.sleep(0.4)
+                if not input_el:
+                    # try clicking the content area to activate, then retry once more
+                    try:
+                        area = await page.query_selector('.interactions.engage-bar .input-box .content-edit')
+                        if area:
+                            await area.click()
+                    except Exception:
+                        pass
+                    input_el = await _find_comment_input(page)
+                if not input_el:
+                    # Attempt to close overlay to restore state
+                    try:
+                        await page.keyboard.press('Escape')
+                    except Exception:
+                        pass
+                    return False, 'no-input'
+                try:
+                    await input_el.scroll_into_view_if_needed()
+                except Exception:
+                    pass
+                await maybe_hover_element(page, input_el, hover_probability=0.6)
+                try:
+                    await input_el.click()
+                except Exception:
+                    try:
+                        await input_el.click(force=True)
+                    except Exception:
+                        pass
+                try:
+                    await page.evaluate("el => el.focus()", input_el)
+                except Exception:
+                    pass
+                try:
+                    await page.wait_for_selector('.interactions.engage-bar .right-btn-area', state='visible', timeout=1500)
+                except Exception:
+                    pass
+                ok2, treason2 = await _type_into_comment_input(page, config, text)
+                if not ok2:
+                    # Close overlay if present
+                    try:
+                        await page.keyboard.press('Escape')
+                    except Exception:
+                        pass
+                    return False, treason2
+                # observation pause
+                await asyncio.sleep(random.uniform(0.3, 0.8))
+                # Submit if requested (within overlay)
+                if config.comment_submit:
+                    await _submit_comment(page, input_el)
+                    await asyncio.sleep(random.uniform(0.3, 0.8))
+                # Close overlay or go back
+                closed = await _close_note_overlay(page)
+                if not closed:
+                    try:
+                        await page.go_back()
+                    except Exception:
+                        pass
+                return True, 'ok'
+        # Fallback: navigate to note URL in a new page and type
+        return await try_type_comment_on_note(context, note_url, text, config)
+    except Exception as exc:
+        return False, f'error:{exc.__class__.__name__}'
+
+
+async def _close_note_overlay(page: Page) -> bool:
+    # Try to close overlay using Escape, then close buttons, then background click.
+    def overlay_present() -> bool:
+        return False  # stub for type checker
+    try:
+        present = await page.query_selector('.interactions.engage-bar, .note-container, #noteContainer')
+        if not present:
+            return True
+    except Exception:
+        return False
+    # Press Escape up to 3 times, waiting briefly for the overlay to disappear
+    for _ in range(3):
+        try:
+            await page.keyboard.press('Escape')
+        except Exception:
+            pass
+        try:
+            await page.wait_for_selector('.interactions.engage-bar, .note-container, #noteContainer', state='detached', timeout=800)
+            return True
+        except Exception:
+            await asyncio.sleep(0.2)
+    # Try clicking a close control
+    for sel in [
+        'button.close',
+        '[aria-label*="close" i]',
+        '.close',
+        '.icon-close',
+        'svg[class*="close" i]'
+    ]:
+        try:
+            btn = await page.query_selector(sel)
+            if btn:
+                await maybe_hover_element(page, btn, hover_probability=0.4)
+                await btn.click()
+                try:
+                    await page.wait_for_selector('.interactions.engage-bar, .note-container, #noteContainer', state='detached', timeout=800)
+                    return True
+                except Exception:
+                    pass
+        except Exception:
+            continue
+    # As a last resort, click near a corner to dismiss
+    try:
+        vs = page.viewport_size
+        if vs:
+            await page.mouse.click(5, 5)
+            try:
+                await page.wait_for_selector('.interactions.engage-bar, .note-container, #noteContainer', state='detached', timeout=800)
+                return True
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return False
+
+
+async def _submit_comment(page: Page, input_el) -> None:
+    # Try to find the enabled submit button near the engage bar and click it.
+    # Prefer the specific submit button in the right-btn-area.
+    selectors_enabled = [
+        '.interactions.engage-bar .right-btn-area button.btn.submit:not([disabled])',
+        'button.btn.submit:not([disabled])',
+        'button:has-text("发送"):not([disabled])',
+        'button:has-text("发表"):not([disabled])',
+        'button:has-text("Send"):not([disabled])',
+        'button:has-text("Post"):not([disabled])',
+    ]
+    btn = None
+    for sel in selectors_enabled:
+        try:
+            btn = await page.query_selector(sel)
+            if btn:
+                break
+        except Exception:
+            btn = None
+    # If not found enabled, wait shortly for it to become enabled after typing
+    if not btn:
+        try:
+            btn = await page.wait_for_selector(
+                '.interactions.engage-bar .right-btn-area button.btn.submit:not([disabled])', timeout=2000
+            )
+        except Exception:
+            btn = None
+    # As a fallback, click generic submit and hope it's enabled
+    if not btn:
+        try:
+            btn = await page.query_selector('.interactions.engage-bar .right-btn-area button.btn.submit')
+        except Exception:
+            btn = None
+    if btn:
+        try:
+            await maybe_hover_element(page, btn, hover_probability=0.4)
+        except Exception:
+            pass
+        try:
+            await btn.click()
+        except Exception:
+            # try pressing Enter if click fails and input is focused
+            try:
+                await input_el.press('Enter')
+            except Exception:
+                pass
+        # Best-effort: wait for input to clear or button to disable again
+        try:
+            await page.wait_for_selector('.interactions.engage-bar .right-btn-area button.btn.submit[disabled], .interactions.engage-bar .right-btn-area button.btn.submit.gray', timeout=1500)
+        except Exception:
+            pass
+
+
+async def _type_into_comment_input(page: Page, config: BotConfig, text: str) -> Tuple[bool, str]:
+    # re-resolve input after activation in case DOM changed
+    input_el = await _find_comment_input(page)
+    if not input_el:
+        return False, 'no-input'
+    # Focus and type with per-char delay
+    try:
+        await page.evaluate("el => el.focus()", input_el)
+    except Exception:
+        pass
+    delay = random.randint(
+        max(0, config.comment_type_delay_min_ms),
+        max(config.comment_type_delay_min_ms, config.comment_type_delay_max_ms),
+    )
+    try:
+        # typing directly into the element
+        await input_el.type(text, delay=delay)
+    except Exception as e:
+        # handle potential detachment by re-querying and trying again
+        try:
+            input_el = await _find_comment_input(page)
+            if input_el:
+                await page.evaluate("el => el.focus()", input_el)
+                await input_el.type(text, delay=delay)
+            else:
+                raise e
+        except Exception:
+            # fallback: if the active element is inside the engage bar, use page.keyboard.type
+            try:
+                active_ok = await page.evaluate(
+                    "() => { const ae = document.activeElement; return !!(ae && ae.closest && ae.closest('.interactions.engage-bar')); }"
+                )
+            except Exception:
+                active_ok = False
+            if active_ok:
+                try:
+                    await page.keyboard.type(text, delay=delay)
+                except Exception as e2:
+                    return False, f'type-failed:{e2.__class__.__name__}'
+            else:
+                # last resort: programmatic insert to contenteditable
+                try:
+                    inserted = await page.evaluate(
+                        """
+                        (txt) => {
+                          const el = document.querySelector('.interactions.engage-bar #content-textarea.content-input[contenteditable="true"], .interactions.engage-bar p#content-textarea[contenteditable="true"]');
+                          if (!el) return false;
+                          el.focus();
+                          try { document.execCommand('insertText', false, txt); } catch (e) {}
+                          const ev = new InputEvent('input', {bubbles: true, cancelable: true, inputType: 'insertText', data: txt});
+                          el.dispatchEvent(ev);
+                          return !!(el.innerText && el.innerText.length);
+                        }
+                        """,
+                        text,
+                    )
+                    if not inserted:
+                        return False, f'type-failed:{e.__class__.__name__}'
+                except Exception:
+                    return False, f'type-failed:{e.__class__.__name__}'
+    # Verify content present
+    try:
+        has_text = await page.evaluate(
+            """
+            () => {
+              const el = document.querySelector('.interactions.engage-bar #content-textarea.content-input[contenteditable="true"], .interactions.engage-bar p#content-textarea[contenteditable="true"]');
+              if (!el) return false;
+              const t = (el.innerText || el.textContent || '').trim();
+              return t.length > 0;
+            }
+            """
+        )
+        if not has_text:
+            return False, 'type-failed:empty'
+    except Exception:
+        pass
+    return True, 'ok'
 
 
 async def cmd_like_latest(
@@ -634,6 +1182,8 @@ async def cmd_like_latest(
             for item in skipped
             if item.get("reason") == "error"
         ][:5]
+        # attach comment metrics if present
+        comments_info = session_state.get("comments") if isinstance(session_state, dict) else None
         summary = {
             "ts": now_ts(),
             "keyword": keyword,
@@ -697,6 +1247,14 @@ def parse_args(argv: List[str]) -> tuple[BotConfig, Any]:
     parser.add_argument("--human-idle-min-s", dest="human_idle_min_s", type=float, default=1.5, help="Minimum pause length when idling")
     parser.add_argument("--human-idle-max-s", dest="human_idle_max_s", type=float, default=4.5, help="Maximum pause length when idling")
     parser.add_argument("--mouse-wiggle-prob", dest="mouse_wiggle_prob", type=float, default=0.4, help="Chance to wiggle the cursor during human idle pauses")
+    # Comment-related (type-only by default; will not submit unless --comment-submit is set)
+    parser.add_argument("--comment-prob", dest="comment_prob", type=float, default=0.1, help="Chance to type a comment after a like (dry-run)")
+    parser.add_argument("--comment-max-per-session", dest="comment_max_per_session", type=int, default=10, help="Maximum comments to type in a session")
+    parser.add_argument("--comment-min-interval-s", dest="comment_min_interval_s", type=float, default=300.0, help="Minimum seconds between comments")
+    parser.add_argument("--comment-text-file", dest="comment_text_file", default="models/comments.txt", help="Path to comments file (one per line)")
+    parser.add_argument("--comment-type-delay-min-ms", dest="comment_type_delay_min_ms", type=int, default=60, help="Minimum per-character typing delay (ms)")
+    parser.add_argument("--comment-type-delay-max-ms", dest="comment_type_delay_max_ms", type=int, default=140, help="Maximum per-character typing delay (ms)")
+    parser.add_argument("--comment-submit", dest="comment_submit", action="store_true", default=False, help="Submit the comment instead of dry-run typing only")
     parser.add_argument("--verbose", action="store_true", help="Print verbose progress output")
 
     ns = parser.parse_args(argv)
@@ -710,6 +1268,27 @@ def parse_args(argv: List[str]) -> tuple[BotConfig, Any]:
     user_agent = ns.user_agent
     if ns.randomize_user_agent and not ns.user_agent:
         user_agent = random.choice(COMMON_USER_AGENTS)
+
+    # Load comment texts if available
+    comment_texts: Optional[List[str]] = None
+    try:
+        path = (ns.comment_text_file or "").strip()
+        if path:
+            p = Path(path)
+            if p.exists() and p.is_file():
+                lines = p.read_text(encoding="utf-8", errors="ignore").splitlines()
+                cleaned = []
+                for line in lines:
+                    s = (line or "").strip()
+                    if not s:
+                        continue
+                    if s.startswith("#"):
+                        continue
+                    cleaned.append(s)
+                if cleaned:
+                    comment_texts = cleaned
+    except Exception:
+        comment_texts = None
 
     config = BotConfig(
         user_data_dir=ns.user_data_dir,
@@ -741,6 +1320,13 @@ def parse_args(argv: List[str]) -> tuple[BotConfig, Any]:
         human_idle_min_s=ns.human_idle_min_s,
         human_idle_max_s=ns.human_idle_max_s,
         mouse_wiggle_prob=ns.mouse_wiggle_prob,
+        comment_prob=ns.comment_prob,
+        comment_max_per_session=ns.comment_max_per_session,
+        comment_min_interval_s=ns.comment_min_interval_s,
+        comment_type_delay_min_ms=ns.comment_type_delay_min_ms,
+        comment_type_delay_max_ms=ns.comment_type_delay_max_ms,
+        comment_texts=comment_texts,
+        comment_submit=ns.comment_submit,
     )
     return config, ns
 

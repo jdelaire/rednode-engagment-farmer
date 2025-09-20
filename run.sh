@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Configurable ENV with defaults (override by exporting before calling or inline: KEYWORD="yoga" ./run.sh)
 # Tuned to mimic human behavior by default: slower pace, higher variability, soft session caps.
 KEYWORD="${KEYWORD:-crossfit}"
-LIMIT="${LIMIT:-30}"
+LIMIT="${LIMIT:-100}"
 SLOW_MS="${SLOW_MS:-90}"
 DELAY_MS="${DELAY_MS:-5000}"
 DELAY_JITTER_PCT="${DELAY_JITTER_PCT:-40}"
@@ -20,8 +20,8 @@ LONG_PAUSE_PROB="${LONG_PAUSE_PROB:-0.30}"
 LONG_PAUSE_MIN_S="${LONG_PAUSE_MIN_S:-6.0}"
 LONG_PAUSE_MAX_S="${LONG_PAUSE_MAX_S:-16.0}"
 SESSION_CAP_MIN="${SESSION_CAP_MIN:-60}"
-SESSION_CAP_MAX="${SESSION_CAP_MAX:-120}"
-DURATION_MIN="${DURATION_MIN:-120}"
+SESSION_CAP_MAX="${SESSION_CAP_MAX:-100}"
+DURATION_MIN="${DURATION_MIN:-180}"
 HUMAN_IDLE_PROB="${HUMAN_IDLE_PROB:-0.4}"
 HUMAN_IDLE_MIN_S="${HUMAN_IDLE_MIN_S:-2.0}"
 HUMAN_IDLE_MAX_S="${HUMAN_IDLE_MAX_S:-6.0}"
@@ -32,6 +32,15 @@ ACCEPT_LANGUAGE="${ACCEPT_LANGUAGE:-}"
 TIMEZONE_ID="${TIMEZONE_ID:-}"
 VIEWPORT_W="${VIEWPORT_W:-}"
 VIEWPORT_H="${VIEWPORT_H:-}"
+
+# Comment (typing only by default; enabled conservatively; submission disabled unless COMMENT_SUBMIT is set)
+COMMENT_PROB="${COMMENT_PROB:-0.10}"
+COMMENT_MAX_PER_SESSION="${COMMENT_MAX_PER_SESSION:-10}"
+COMMENT_MIN_INTERVAL_S="${COMMENT_MIN_INTERVAL_S:-300}"
+COMMENT_TEXT_FILE="${COMMENT_TEXT_FILE:-${SCRIPT_DIR}/models/comments.txt}"
+COMMENT_TYPE_DELAY_MIN_MS="${COMMENT_TYPE_DELAY_MIN_MS:-60}"
+COMMENT_TYPE_DELAY_MAX_MS="${COMMENT_TYPE_DELAY_MAX_MS:-140}"
+COMMENT_SUBMIT="${COMMENT_SUBMIT:-}"
 
 if [[ -z "${KEYWORD// }" ]]; then
   echo "KEYWORD must be set (e.g. KEYWORD=\"yoga\" ./run.sh)" >&2
@@ -71,11 +80,18 @@ xhs-bot like-latest "$KEYWORD" \
   --human-idle-min-s "$HUMAN_IDLE_MIN_S" \
   --human-idle-max-s "$HUMAN_IDLE_MAX_S" \
   --mouse-wiggle-prob "$MOUSE_WIGGLE_PROB" \
+  --comment-prob "$COMMENT_PROB" \
+  --comment-max-per-session "$COMMENT_MAX_PER_SESSION" \
+  --comment-min-interval-s "$COMMENT_MIN_INTERVAL_S" \
+  --comment-text-file "$COMMENT_TEXT_FILE" \
+  --comment-type-delay-min-ms "$COMMENT_TYPE_DELAY_MIN_MS" \
+  --comment-type-delay-max-ms "$COMMENT_TYPE_DELAY_MAX_MS" \
   ${VERBOSE:+--verbose} \
   ${HEADLESS:+--headless} \
   ${NO_RANDOM_UA:+--no-random-ua} \
   ${NO_RANDOM_ORDER:+--no-random-order} \
   ${NO_STEALTH:+--no-stealth} \
+  ${COMMENT_SUBMIT:+--comment-submit} \
   ${USER_AGENT:+--user-agent "$USER_AGENT"} \
   ${ACCEPT_LANGUAGE:+--accept-language "$ACCEPT_LANGUAGE"} \
   ${TIMEZONE_ID:+--timezone-id "$TIMEZONE_ID"} \
