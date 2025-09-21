@@ -34,7 +34,7 @@ VIEWPORT_W="${VIEWPORT_W:-}"
 VIEWPORT_H="${VIEWPORT_H:-}"
 
 # Comment (typing only by default; enabled conservatively; submission disabled unless COMMENT_SUBMIT is set)
-COMMENT_PROB="${COMMENT_PROB:-0.10}"
+COMMENT_PROB="${COMMENT_PROB:-0.15}"
 COMMENT_MAX_PER_SESSION="${COMMENT_MAX_PER_SESSION:-10}"
 COMMENT_MIN_INTERVAL_S="${COMMENT_MIN_INTERVAL_S:-300}"
 COMMENT_TEXT_FILE="${COMMENT_TEXT_FILE:-${SCRIPT_DIR}/models/comments.txt}"
