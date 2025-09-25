@@ -221,6 +221,16 @@ async def _ensure_note_handle(page: Page, note, info: Dict[str, Any]):
     return None
 
 
+async def _is_handle_connected(handle) -> bool:
+    """Best-effort check that an element handle is still attached."""
+    if handle is None:
+        return False
+    try:
+        return await handle.evaluate("node => !!(node && node.isConnected)")
+    except Exception:
+        return False
+
+
 async def _detect_block_state(page: Page) -> str:
     try:
         current_url = page.url
@@ -485,19 +495,32 @@ async def like_latest_from_search(
                     await maybe_idle_like_human(page, config)
                     await maybe_hover_element(page, like_target, config.hover_prob)
 
+                    if not await _is_handle_connected(like_target):
+                        dom_detached_failure = True
+                        attempts += 1
+                        if attempts >= max_attempts:
+                            break
+                        note = await _ensure_note_handle(page, note, info) or note
+                        await asyncio.sleep(random.uniform(0.1, 0.3))
+                        continue
+
                     try:
+                        try:
+                            await like_target.wait_for_element_state("stable")
+                        except Exception:
+                            pass
                         await like_target.click()
                     except Exception as exc:
                         last_exc = exc
                         msg = str(exc).lower()
-                        if "not attached" in msg and attempts < max_attempts - 1:
-                            note = await _ensure_note_handle(page, note, info) or note
-                            dom_detached_failure = True
-                            attempts += 1
-                            await asyncio.sleep(random.uniform(0.1, 0.3))
-                            continue
                         if "not attached" in msg:
                             dom_detached_failure = True
+                            attempts += 1
+                            if attempts >= max_attempts:
+                                break
+                            note = await _ensure_note_handle(page, note, info) or note
+                            await asyncio.sleep(random.uniform(0.1, 0.3))
+                            continue
                         raise
 
                     try:
@@ -1158,8 +1181,6 @@ async def cmd_like_latest(
             duration_sec=duration_sec,
         )
         for item in liked:
-            url = item.get("url", "")
-            print(f"[{now_ts()}] Liked: {url}")
             elapsed = time.monotonic()
             base_delay = delay_ms
             if config.ramp_up_s > 0 and elapsed < config.ramp_up_s:
