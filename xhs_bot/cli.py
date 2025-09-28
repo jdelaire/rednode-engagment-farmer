@@ -28,9 +28,30 @@ COMMON_USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.118 Safari/537.36",
 ]
 
+SESSION_LOG_PATH = Path("session_logs.jsonl")
+
+DEFAULT_DWELL_PROB = 0.3
+DEFAULT_DWELL_MIN_S = 3.5
+DEFAULT_DWELL_MAX_S = 9.0
+DEFAULT_REVISIT_SCROLL_PROB = 0.25
+DEFAULT_REVISIT_SCROLL_MIN = 120
+DEFAULT_REVISIT_SCROLL_MAX = 420
+DEFAULT_PREVIEW_NOTE_PROB = 0.18
+DEFAULT_PREVIEW_NOTE_MIN_S = 1.4
+DEFAULT_PREVIEW_NOTE_MAX_S = 4.0
+
 
 def now_ts() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def append_session_log(summary: Dict[str, Any]) -> None:
+    try:
+        with SESSION_LOG_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(summary, ensure_ascii=False))
+            fh.write("\n")
+    except Exception:
+        pass
 
 
 @dataclass
@@ -74,6 +95,15 @@ class BotConfig:
     comment_texts: Optional[List[str]] = None
     comment_submit: bool = False  # default dry-run: type only, do not submit
     comment_after_like_only: bool = True
+    dwell_prob: float = DEFAULT_DWELL_PROB
+    dwell_min_s: float = DEFAULT_DWELL_MIN_S
+    dwell_max_s: float = DEFAULT_DWELL_MAX_S
+    revisit_scroll_prob: float = DEFAULT_REVISIT_SCROLL_PROB
+    revisit_scroll_min: int = DEFAULT_REVISIT_SCROLL_MIN
+    revisit_scroll_max: int = DEFAULT_REVISIT_SCROLL_MAX
+    preview_note_prob: float = DEFAULT_PREVIEW_NOTE_PROB
+    preview_note_min_s: float = DEFAULT_PREVIEW_NOTE_MIN_S
+    preview_note_max_s: float = DEFAULT_PREVIEW_NOTE_MAX_S
 
 
 async def create_context(config: BotConfig) -> tuple[Playwright, BrowserContext]:
@@ -192,6 +222,109 @@ async def maybe_idle_like_human(page: Page, config: BotConfig) -> None:
         await asyncio.sleep(random.uniform(sleep_min, sleep_max))
     except Exception:
         pass
+
+
+async def maybe_take_feed_break(page: Page, config: BotConfig) -> None:
+    try:
+        prob = max(0.0, min(1.0, config.dwell_prob))
+        if prob <= 0 or random.random() > prob:
+            return
+        sleep_min = max(0.5, config.dwell_min_s)
+        sleep_max = max(sleep_min, config.dwell_max_s)
+        # Small cursor drift before pausing to mimic reading
+        viewport = page.viewport_size
+        if viewport and random.random() < 0.4:
+            try:
+                base_x = random.uniform(viewport["width"] * 0.2, viewport["width"] * 0.8)
+                base_y = random.uniform(viewport["height"] * 0.25, viewport["height"] * 0.9)
+                await page.mouse.move(base_x, base_y, steps=random.randint(6, 15))
+            except Exception:
+                pass
+        await asyncio.sleep(random.uniform(sleep_min, sleep_max))
+    except Exception:
+        pass
+
+
+async def maybe_revisit_feed(page: Page, config: BotConfig) -> None:
+    try:
+        prob = max(0.0, min(1.0, config.revisit_scroll_prob))
+        if prob <= 0 or config.revisit_scroll_max <= 0 or random.random() > prob:
+            return
+        lower = max(40, min(config.revisit_scroll_min, config.revisit_scroll_max))
+        upper = max(lower, config.revisit_scroll_max)
+        delta = random.randint(lower, upper)
+        if random.random() < 0.6:
+            await page.mouse.wheel(0, -delta)
+        else:
+            await page.evaluate("(y) => window.scrollBy(0, -y)", delta)
+        await asyncio.sleep(random.uniform(0.4, 1.2))
+        if random.random() < 0.7:
+            rebound = random.randint(int(delta * 0.3), delta)
+            try:
+                await page.mouse.wheel(0, rebound)
+            except Exception:
+                await page.evaluate("(y) => window.scrollBy(0, y)", rebound)
+    except Exception:
+        pass
+
+
+async def preview_note_detail(page: Page, note_handle, config: BotConfig) -> bool:
+    try:
+        cover = None
+        for sel in ['a.cover.mask.ld', 'a.cover.mask', 'a.cover', 'a[href^="/explore/"]']:
+            try:
+                el = await note_handle.query_selector(sel)
+            except Exception:
+                el = None
+            if el:
+                cover = el
+                break
+        if not cover:
+            return False
+        try:
+            await cover.scroll_into_view_if_needed()
+        except Exception:
+            pass
+        await maybe_hover_element(page, cover, hover_probability=0.45)
+        await cover.click()
+        opened = False
+        try:
+            await page.wait_for_selector(
+                '.interactions.engage-bar, .note-container, #noteContainer', timeout=2500
+            )
+            opened = True
+        except Exception:
+            pass
+        dwell_min = max(0.8, config.preview_note_min_s)
+        dwell_max = max(dwell_min, config.preview_note_max_s)
+        await asyncio.sleep(random.uniform(dwell_min, dwell_max))
+        if opened:
+            await _close_note_overlay(page)
+        else:
+            try:
+                await page.wait_for_timeout(200)
+            except Exception:
+                pass
+        return True
+    except Exception:
+        return False
+
+
+async def maybe_preview_note_detail(page: Page, note_handle, info: Dict[str, Any], config: BotConfig) -> bool:
+    try:
+        prob = max(0.0, min(1.0, config.preview_note_prob))
+        if prob <= 0 or random.random() > prob:
+            return False
+        refreshed = await _ensure_note_handle(page, note_handle, info)
+        target = refreshed or note_handle
+        if target is None:
+            return False
+        viewed = await preview_note_detail(page, target, config)
+        if viewed:
+            await maybe_take_feed_break(page, config)
+        return viewed
+    except Exception:
+        return False
 
 
 async def _ensure_note_handle(page: Page, note, info: Dict[str, Any]):
@@ -465,6 +598,8 @@ async def like_latest_from_search(
                 continue
             seen_explore_ids.add(url)
             if random.random() > max(0.0, min(1.0, config.like_prob)):
+                await maybe_preview_note_detail(page, note, info, config)
+                await maybe_take_feed_break(page, config)
                 continue
             try:
                 note = await _ensure_note_handle(page, note, info) or note
@@ -551,6 +686,7 @@ async def like_latest_from_search(
                         if config.verbose:
                             print(f"[{now_ts()}] Liked: {url}")
                         # Maybe type a comment after like (dry-run by default)
+                        comment_was_attempted = False
                         if (
                             config.comment_texts
                             and len(config.comment_texts) > 0
@@ -560,6 +696,7 @@ async def like_latest_from_search(
                             now_t = time.monotonic()
                             interval_ok = (now_t - last_comment_time) >= max(0.0, config.comment_min_interval_s)
                             if should_comment and interval_ok:
+                                comment_was_attempted = True
                                 comment_attempts += 1
                                 comment_text = random.choice(config.comment_texts)
                                 if config.verbose:
@@ -580,6 +717,9 @@ async def like_latest_from_search(
                                 else:
                                     if config.verbose:
                                         print(f"[{now_ts()}] Comment skipped on {url}: {reason}")
+                        if not comment_was_attempted:
+                            await maybe_preview_note_detail(page, note, info, config)
+                        await maybe_take_feed_break(page, config)
                         break
 
                     if config.verbose:
@@ -591,6 +731,8 @@ async def like_latest_from_search(
                             "reason": "unchanged",
                         }
                     )
+                    await maybe_take_feed_break(page, config)
+                    await maybe_preview_note_detail(page, note, info, config)
 
                     if attempts == 0:
                         note = await _ensure_note_handle(page, note, info) or note
@@ -629,6 +771,7 @@ async def like_latest_from_search(
                         "error_message": err_msg[:200],
                     }
                 )
+                await maybe_take_feed_break(page, config)
                 continue
         if len(liked_items) == last_liked_count and not progress:
             idle_rounds += 1
@@ -648,10 +791,12 @@ async def like_latest_from_search(
                     await page.mouse.wheel(0, -random.randint(50, 200))
         except Exception:
             pass
+        await maybe_revisit_feed(page, config)
         if random.random() <= config.long_pause_prob:
             await asyncio.sleep(random.uniform(config.long_pause_min_s, config.long_pause_max_s))
         else:
             await asyncio.sleep(random.uniform(0.4, 1.1))
+        await maybe_take_feed_break(page, config)
     # record comment metrics
     try:
         session_state.setdefault("comments", {})
@@ -1217,6 +1362,7 @@ async def cmd_like_latest(
             "session_state": session_state,
         }
         print(f"[{summary['ts']}] Summary: {json.dumps(summary, ensure_ascii=False)}")
+        append_session_log(summary)
     finally:
         try:
             await context.close()

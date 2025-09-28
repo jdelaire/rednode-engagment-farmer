@@ -20,3 +20,7 @@ Commits typically start with a capitalized type prefix (`Refactor:`, `Fix:`, `fe
 
 ## Security & Configuration Tips
 Never commit personal cookies or Playwright profiles; ensure `LoginInfo/` and `.xhs_bot/` stay ignored. When sharing reproduction steps, redact post URLs and comments. For long-running sessions set `USER_DATA` to a safe path outside the repo, and favor headless runs when capturing debug logs.
+
+## Current Status
+- Each run writes its JSON summary to `session_logs.jsonl` in the working directory so engagement history can be analyzed later.
+- Feed browsing is more varied: sessions now insert occasional dwell pauses, reverse scrolls, and brief note previews without immediate engagement to soften automation fingerprints.

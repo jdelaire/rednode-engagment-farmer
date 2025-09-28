@@ -66,7 +66,9 @@ Notes
 - If a note is already liked or Playwright cannot find the icon, the entry is skipped and the script continues.
 - Some notes are app-only on web and show an overlay like "当前笔记暂时无法浏览". These are detected and skipped automatically.
 - The bot prioritizes cards with fewer than 10 likes first (based on the count shown on each card), then processes the rest according to your randomization settings.
+- Between likes the automation sometimes lingers on the feed, scrolls back to earlier cards, or opens a note briefly without interacting to mimic a curious human.
 - Each run randomizes viewport size and, by default, rotates between a small set of desktop user-agents and inserts human-style reading pauses to lower automation fingerprints.
+- Session summaries are appended to `session_logs.jsonl` (in the current working directory) so you can review engagement history over time.
 - At the end of a session the CLI emits a JSON summary with counts for liked/skipped posts, error breakdowns, the final `session_state`, and sample error details (type + message). Capture this output when tuning heuristics.
 - Feed reflows occasionally detach card nodes mid-click; the bot retries up to three times and records a `dom-detached` skip if the element keeps disappearing so you can monitor instability.
 - If the browser session is no longer authenticated, the run stops early, prints a relogin hint, and exits with status code `1` so orchestrations can trigger manual sign-in.
