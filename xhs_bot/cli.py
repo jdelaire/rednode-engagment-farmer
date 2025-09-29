@@ -1,7 +1,7 @@
 import asyncio
 import json
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, cast
 import random
@@ -29,6 +29,85 @@ COMMON_USER_AGENTS = [
 ]
 
 SESSION_LOG_PATH = Path("session_logs.jsonl")
+
+DEFAULT_COMMENT_BUCKETS = {
+    "low": [
+        "Keep showing up and momentum builds",
+        "One more rep makes a difference",
+        "Great to see the early grind",
+        "Fresh start, strong finish ahead",
+    ],
+    "mid": [
+        "Energy here feels unstoppable",
+        "Loving the discipline in this set",
+        "Dialed in and focused - keep it up",
+        "Consistency is clearly paying off",
+    ],
+    "high": [
+        "This level of effort really inspires",
+        "You are setting a high bar for everyone",
+        "That is championship commitment on display",
+        "Outstanding intensity all the way through",
+    ],
+    "general": [
+        "Always impressed by the dedication",
+        "Hard work today fuels tomorrow",
+        "Strong work - thanks for sharing",
+        "Love seeing this routine locked in",
+    ],
+}
+
+
+def load_comment_library(custom_path: Optional[str]) -> tuple[List[str], Dict[str, List[str]]]:
+    """Load comments grouped by buckets; supports optional `bucket|text` lines."""
+    buckets: Dict[str, List[str]] = {k: list(v) for k, v in DEFAULT_COMMENT_BUCKETS.items()}
+    flat: List[str] = [text for values in buckets.values() for text in values]
+    seen: set[str] = set(flat)
+    valid_buckets = set(buckets.keys())
+
+    candidate_paths: List[Path] = []
+    if custom_path:
+        candidate_paths.append(Path(custom_path))
+    candidate_paths.append(Path("models/comments.txt"))
+    fallback_path = Path(__file__).resolve().parent.parent / "models" / "comments.txt"
+    if fallback_path not in candidate_paths:
+        candidate_paths.append(fallback_path)
+
+    def add_text(bucket: str, text: str) -> None:
+        if not text or text in seen:
+            return
+        buckets.setdefault(bucket, []).append(text)
+        flat.append(text)
+        seen.add(text)
+
+    for path in candidate_paths:
+        try:
+            if not path.exists() or not path.is_file():
+                continue
+            for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                raw = (line or "").strip()
+                if not raw or raw.startswith("#"):
+                    continue
+                bucket = "general"
+                text = raw
+                if "|" in raw:
+                    prefix, rest = raw.split("|", 1)
+                    bucket = prefix.strip().lower() or "general"
+                    text = rest.strip()
+                elif raw.startswith("[") and "]" in raw:
+                    closing = raw.find("]")
+                    prefix = raw[1:closing].strip().lower()
+                    remainder = raw[closing + 1 :].strip()
+                    if remainder:
+                        bucket = prefix or "general"
+                        text = remainder
+                if bucket not in valid_buckets:
+                    bucket = "general"
+                add_text(bucket, text)
+        except Exception:
+            continue
+
+    return flat, buckets
 
 DEFAULT_DWELL_PROB = 0.3
 DEFAULT_DWELL_MIN_S = 3.5
@@ -95,6 +174,7 @@ class BotConfig:
     comment_texts: Optional[List[str]] = None
     comment_submit: bool = False  # default dry-run: type only, do not submit
     comment_after_like_only: bool = True
+    comment_buckets: Dict[str, List[str]] = field(default_factory=dict)
     dwell_prob: float = DEFAULT_DWELL_PROB
     dwell_min_s: float = DEFAULT_DWELL_MIN_S
     dwell_max_s: float = DEFAULT_DWELL_MAX_S
@@ -325,6 +405,33 @@ async def maybe_preview_note_detail(page: Page, note_handle, info: Dict[str, Any
         return viewed
     except Exception:
         return False
+
+
+def choose_comment_text(info: Dict[str, Any], config: BotConfig) -> Optional[str]:
+    buckets = getattr(config, "comment_buckets", {}) or {}
+    pool: List[str] = []
+    like_count = info.get("likeCount")
+    bucket_key = "general"
+    if isinstance(like_count, (int, float)):
+        if like_count < 20:
+            bucket_key = "low"
+        elif like_count < 120:
+            bucket_key = "mid"
+        else:
+            bucket_key = "high"
+    specific = buckets.get(bucket_key)
+    if specific:
+        pool.extend(specific)
+    general = buckets.get("general")
+    if general:
+        pool.extend(general)
+    if not pool:
+        fallback = config.comment_texts or []
+        pool.extend(fallback)
+    pool = [text for text in pool if text]
+    if not pool:
+        return None
+    return random.choice(pool)
 
 
 async def _ensure_note_handle(page: Page, note, info: Dict[str, Any]):
@@ -697,8 +804,11 @@ async def like_latest_from_search(
                             interval_ok = (now_t - last_comment_time) >= max(0.0, config.comment_min_interval_s)
                             if should_comment and interval_ok:
                                 comment_was_attempted = True
+                                comment_text = choose_comment_text(info, config)
+                                if not comment_text:
+                                    comment_was_attempted = False
+                                    continue
                                 comment_attempts += 1
-                                comment_text = random.choice(config.comment_texts)
                                 if config.verbose:
                                     preview = comment_text if len(comment_text) <= 160 else (comment_text[:160] + "...")
                                     action = "submit" if config.comment_submit else "type (dry-run)"
@@ -1436,26 +1546,7 @@ def parse_args(argv: List[str]) -> tuple[BotConfig, Any]:
     if ns.randomize_user_agent and not ns.user_agent:
         user_agent = random.choice(COMMON_USER_AGENTS)
 
-    # Load comment texts if available
-    comment_texts: Optional[List[str]] = None
-    try:
-        path = (ns.comment_text_file or "").strip()
-        if path:
-            p = Path(path)
-            if p.exists() and p.is_file():
-                lines = p.read_text(encoding="utf-8", errors="ignore").splitlines()
-                cleaned = []
-                for line in lines:
-                    s = (line or "").strip()
-                    if not s:
-                        continue
-                    if s.startswith("#"):
-                        continue
-                    cleaned.append(s)
-                if cleaned:
-                    comment_texts = cleaned
-    except Exception:
-        comment_texts = None
+    comment_texts, comment_buckets = load_comment_library((ns.comment_text_file or "").strip() or None)
 
     config = BotConfig(
         user_data_dir=ns.user_data_dir,
@@ -1494,6 +1585,7 @@ def parse_args(argv: List[str]) -> tuple[BotConfig, Any]:
         comment_type_delay_max_ms=ns.comment_type_delay_max_ms,
         comment_texts=comment_texts,
         comment_submit=ns.comment_submit,
+        comment_buckets=comment_buckets,
     )
     return config, ns
 
