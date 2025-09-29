@@ -208,3 +208,6 @@ __marimo__/
 
 # bot dat
 LoginInfo/
+
+# logs
+session_logs.jsonl
