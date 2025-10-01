@@ -67,6 +67,7 @@ Notes
 - Some notes are app-only on web and show an overlay like "当前笔记暂时无法浏览". These are detected and skipped automatically.
 - The bot prioritizes cards with fewer than 10 likes first (based on the count shown on each card), then processes the rest according to your randomization settings.
 - Between likes the automation sometimes lingers on the feed, scrolls back to earlier cards, or opens a note briefly without interacting to mimic a curious human.
+- If the feed dries up or the bot sees a burst of `dom-detached` errors, it auto-reloads the search results and records the event in the session log.
 - Comment text is chosen from buckets in `models/comments.txt`; add lines like `low|Your fresh grind looks great` or `high|This set is pure power` to steer what gets posted for low-, mid-, and high-engagement notes.
 - Each run randomizes viewport size and, by default, rotates between a small set of desktop user-agents and inserts human-style reading pauses to lower automation fingerprints.
 - Session summaries are appended to `session_logs.jsonl` (in the current working directory) so you can review engagement history over time.

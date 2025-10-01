@@ -565,12 +565,47 @@ async def like_latest_from_search(
     skipped_items: List[Dict[str, Any]] = []
     seen_explore_ids: set[str] = set()
     session_state: Dict[str, Any] = {"block_state": "ok"}
+    session_state.setdefault("resilience_events", [])
     session_expired_logged = False
     session_like_target = limit
     # comment session tracking (type-only by default)
     comments_typed = 0
     comment_attempts = 0
     last_comment_time = 0.0
+    dom_detached_recent = []
+    empty_candidate_rounds = 0
+    max_reload_attempts = 3
+    reload_attempts = 0
+
+    async def record_resilience_event(event_type: str, reason: str) -> None:
+        entry = {
+            "ts": now_ts(),
+            "event": event_type,
+            "reason": reason,
+            "reloads": reload_attempts,
+        }
+        try:
+            session_state["resilience_events"].append(entry)
+        except Exception:
+            pass
+        if config.verbose:
+            print(f"[{entry['ts']}] Resilience: {event_type} ({reason})")
+
+    async def reload_feed(reason: str) -> bool:
+        nonlocal reload_attempts, empty_candidate_rounds, dom_detached_recent
+        if reload_attempts >= max_reload_attempts:
+            return False
+        reload_attempts += 1
+        try:
+            await record_resilience_event("reload", reason)
+            await page.goto(search_url, wait_until="domcontentloaded")
+            await asyncio.sleep(random.uniform(4.0, 6.0))
+            seen_explore_ids.clear()
+            empty_candidate_rounds = 0
+            dom_detached_recent = []
+            return True
+        except Exception:
+            return False
 
     async def extract_note_info(note_handle) -> Dict[str, Any]:
         data = await page.evaluate(
@@ -689,6 +724,16 @@ async def like_latest_from_search(
             random.shuffle(low_like)
             random.shuffle(others)
         ordered = low_like + others
+
+        if not ordered:
+            empty_candidate_rounds += 1
+            if empty_candidate_rounds >= 3:
+                if await reload_feed("no-candidates"):
+                    continue
+            await asyncio.sleep(random.uniform(1.0, 2.0))
+            continue
+        else:
+            empty_candidate_rounds = 0
 
         progress = False
         for note, info in ordered:
@@ -861,6 +906,12 @@ async def like_latest_from_search(
                             "reason": reason,
                         }
                     )
+                    if reason == "dom-detached":
+                        dom_detached_recent.append(time.monotonic())
+                        dom_detached_recent = [t for t in dom_detached_recent if time.monotonic() - t <= 180.0]
+                        if len(dom_detached_recent) >= 8:
+                            if await reload_feed("dom-detached-spike"):
+                                break
 
                 if len(liked_items) >= session_like_target:
                     break
@@ -881,6 +932,12 @@ async def like_latest_from_search(
                         "error_message": err_msg[:200],
                     }
                 )
+                if skip_reason == "dom-detached":
+                    dom_detached_recent.append(time.monotonic())
+                    dom_detached_recent = [t for t in dom_detached_recent if time.monotonic() - t <= 180.0]
+                    if len(dom_detached_recent) >= 8:
+                        if await reload_feed("dom-detached-spike"):
+                            continue
                 await maybe_take_feed_break(page, config)
                 continue
         if len(liked_items) == last_liked_count and not progress:

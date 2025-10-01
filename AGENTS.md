@@ -24,4 +24,5 @@ Never commit personal cookies or Playwright profiles; ensure `LoginInfo/` and `.
 ## Current Status
 - Each run writes its JSON summary to `session_logs.jsonl` in the working directory so engagement history can be analyzed later.
 - Feed browsing is more varied: sessions now insert occasional dwell pauses, reverse scrolls, and brief note previews without immediate engagement to soften automation fingerprints.
+- Resilience guardrails reload the feed when selectors dry up or repeated `dom-detached` skips occur, logging the recovery so you can monitor drift.
 - Comment selection is bucketed: add `low|`, `mid|`, or `high|` prefixes in `models/comments.txt` to steer messaging by the note’s visible like count.
