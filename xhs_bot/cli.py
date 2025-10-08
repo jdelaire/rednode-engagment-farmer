@@ -720,6 +720,36 @@ async def _is_handle_connected(handle) -> bool:
         return False
 
 
+async def _resolve_like_target(note_handle) -> Optional[Any]:
+    selectors = [
+        "span.like-wrapper button",
+        "span.like-wrapper",
+        "button:has-text(\"点赞\")",
+        "button:has-text(\"Like\")",
+        "button:has-text(\"喜欢\")",
+        "[aria-label*='like' i]",
+        "[aria-label*='喜欢' i]",
+        "[data-role*='like' i]",
+        "svg.like-icon",
+        ".like-wrapper .like-icon",
+        "button.like-btn",
+    ]
+    for sel in selectors:
+        candidate = None
+        try:
+            candidate = await note_handle.query_selector(sel)
+        except Exception:
+            candidate = None
+        if not candidate:
+            continue
+        try:
+            if await _is_handle_connected(candidate):
+                return candidate
+        except Exception:
+            continue
+    return None
+
+
 async def _detect_block_state(page: Page) -> str:
     try:
         current_url = page.url
@@ -802,21 +832,6 @@ async def like_latest_from_search(
     page = context.pages[0] if context.pages else await context.new_page()
     base_url = "https://www.xiaohongshu.com"
     search_url = f"{base_url}/search_result/?keyword={quote_plus(keyword)}&source=web_explore_feed&type={search_type}"
-    await page.goto(search_url, wait_until="domcontentloaded")
-    try:
-        await page.wait_for_load_state("networkidle", timeout=8000)
-    except Exception:
-        pass
-
-    filter_selected = await apply_latest_filter(page, config)
-    if filter_selected:
-        await asyncio.sleep(random.uniform(2.5, 4.5))
-    else:
-        if config.verbose:
-            print("Waiting 60 seconds so you can switch filters before automation starts...")
-        await asyncio.sleep(60)
-
-    start_ts = time.monotonic()
 
     liked_items: List[Dict[str, Any]] = []
     skipped_items: List[Dict[str, Any]] = []
@@ -842,11 +857,42 @@ async def like_latest_from_search(
             "reloads": reload_attempts,
         }
         try:
-            session_state["resilience_events"].append(entry)
+            session_state.setdefault("resilience_events", []).append(entry)
         except Exception:
             pass
         if config.verbose:
             print(f"[{entry['ts']}] Resilience: {event_type} ({reason})")
+
+    async def navigate_with_retries(label: str, url: str, attempts: int = 3) -> bool:
+        for attempt in range(1, max(1, attempts) + 1):
+            try:
+                await page.goto(url, wait_until="domcontentloaded")
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=8000)
+                except Exception:
+                    pass
+                return True
+            except Exception as exc:
+                await record_resilience_event(
+                    "nav-retry",
+                    f"{label}:{exc.__class__.__name__}:attempt={attempt}",
+                )
+                if attempt >= attempts:
+                    raise
+                await asyncio.sleep(random.uniform(2.0, 4.0) * attempt)
+        return False
+
+    await navigate_with_retries("initial-load", search_url, attempts=3)
+
+    filter_selected = await apply_latest_filter(page, config)
+    if filter_selected:
+        await asyncio.sleep(random.uniform(2.5, 4.5))
+    else:
+        if config.verbose:
+            print("Waiting 60 seconds so you can switch filters before automation starts...")
+        await asyncio.sleep(60)
+
+    start_ts = time.monotonic()
 
     async def reload_feed(reason: str) -> bool:
         nonlocal reload_attempts, empty_candidate_rounds, dom_detached_recent
@@ -855,8 +901,13 @@ async def like_latest_from_search(
         reload_attempts += 1
         try:
             await record_resilience_event("reload", reason)
-            await page.goto(search_url, wait_until="domcontentloaded")
+            await navigate_with_retries(f"reload:{reason}", search_url, attempts=2)
             await asyncio.sleep(random.uniform(4.0, 6.0))
+            filter_refreshed = await apply_latest_filter(page, config)
+            if filter_refreshed:
+                await asyncio.sleep(random.uniform(2.0, 3.5))
+            else:
+                await record_resilience_event("filter-manual", f"reload:{reason}")
             seen_explore_ids.clear()
             empty_candidate_rounds = 0
             dom_detached_recent = []
@@ -868,34 +919,90 @@ async def like_latest_from_search(
         data = await page.evaluate(
             r"""
             (note) => {
+              const dataset = note.dataset || {};
               const exploreA = note.querySelector('a[href^="/explore/"]');
               const searchA = note.querySelector('a[href^="/search_result/"]');
-              const hrefRaw = (exploreA && exploreA.getAttribute('href')) || (searchA && searchA.getAttribute('href')) || '';
-              let exploreHref = '';
-              if (hrefRaw.startsWith('/explore/')) {
-                exploreHref = new URL(hrefRaw, 'https://www.xiaohongshu.com').toString();
-              } else if (hrefRaw.startsWith('/search_result/')) {
-                const id = hrefRaw.split('/').pop()?.split('?')[0] || '';
-                if (id) {
-                  exploreHref = new URL('/explore/' + id, 'https://www.xiaohongshu.com').toString();
+              let hrefRaw = (exploreA && exploreA.getAttribute('href')) || (searchA && searchA.getAttribute('href')) || '';
+              if (!hrefRaw) {
+                const fallbackAnchor = note.querySelector('a[href*="/explore/"]');
+                hrefRaw = fallbackAnchor ? fallbackAnchor.getAttribute('href') || '' : '';
+              }
+              const datasetLink = note.getAttribute('data-note-url') || note.getAttribute('data-link') || dataset.noteUrl || dataset.link || '';
+              const datasetId = note.getAttribute('data-note-id') || note.getAttribute('data-noteid') || dataset.noteId || dataset.id || '';
+              const normalizeExplore = (href) => {
+                if (!href) return '';
+                try {
+                  if (href.startsWith('/explore/')) {
+                    return new URL(href, 'https://www.xiaohongshu.com').toString();
+                  }
+                  const url = new URL(href, 'https://www.xiaohongshu.com');
+                  if (url.pathname && url.pathname.startsWith('/explore/')) {
+                    return url.toString();
+                  }
+                } catch (e) {
+                  return '';
+                }
+                if (href.startsWith('/search_result/')) {
+                  const id = href.split('/').pop()?.split('?')[0] || '';
+                  if (id) {
+                    return new URL('/explore/' + id, 'https://www.xiaohongshu.com').toString();
+                  }
+                }
+                return '';
+              };
+              let exploreHref = normalizeExplore(hrefRaw);
+              if (!exploreHref) {
+                exploreHref = normalizeExplore(datasetLink);
+              }
+              if (!exploreHref && datasetId) {
+                try {
+                  exploreHref = new URL('/explore/' + datasetId, 'https://www.xiaohongshu.com').toString();
+                } catch (e) {
+                  exploreHref = '';
                 }
               }
               const titleEl = note.querySelector('.footer .title');
-              const title = titleEl ? (titleEl.textContent || '').trim() : '';
+              let title = titleEl ? (titleEl.textContent || '').trim() : '';
+              if (!title) {
+                const datasetTitle = note.getAttribute('data-title') || dataset.title || dataset.noteTitle || '';
+                if (datasetTitle) {
+                  title = datasetTitle.trim();
+                }
+              }
+              if (!title) {
+                const aria = note.getAttribute('aria-label') || '';
+                if (aria) {
+                  title = aria.trim();
+                }
+              }
               const useEl = note.querySelector('svg.like-icon use');
               const likeHref = useEl ? useEl.getAttribute('xlink:href') || useEl.getAttribute('href') || '' : '';
-              const alreadyLiked = likeHref.includes('liked');
+              const className = (note.className || '').toString().toLowerCase();
+              const alreadyLiked = likeHref.includes('liked') || className.includes('liked');
               const countEl = note.querySelector('.like-wrapper .count');
               let likeCount = null;
-              if (countEl) {
-                const raw = (countEl.textContent || '').trim();
-                const mW = raw.match(/^(\d+(?:\.\d+)?)\s*[wW]$/);
+              const parseCount = (raw) => {
+                if (!raw) return null;
+                const trimmed = String(raw).trim();
+                if (!trimmed) return null;
+                const mW = trimmed.match(/^(\d+(?:\.\d+)?)\s*[wW]$/);
                 if (mW) {
-                  likeCount = Math.round(parseFloat(mW[1]) * 10000);
-                } else {
-                  const m = raw.match(/\d+/);
-                  if (m) likeCount = parseInt(m[0], 10);
+                  return Math.round(parseFloat(mW[1]) * 10000);
                 }
+                const digits = trimmed.match(/\d+/g);
+                if (digits && digits.length) {
+                  return parseInt(digits[0], 10);
+                }
+                return null;
+              };
+              if (countEl) {
+                likeCount = parseCount(countEl.textContent || '');
+              }
+              if (likeCount === null) {
+                likeCount = parseCount(note.getAttribute('data-like-count') || dataset.likeCount || dataset.likes || '');
+              }
+              if (likeCount === null) {
+                likeCount = parseCount(note.getAttribute('aria-label') || '');
               }
               return { exploreHref, title, alreadyLiked, likeCount };
             }
@@ -914,6 +1021,8 @@ async def like_latest_from_search(
         session_like_target = max(1, min(limit, random.randint(lo, hi)))
         if config.verbose:
             print(f"Session like target: {session_like_target}")
+
+    max_rounds = max(120, session_like_target * 4 if session_like_target else 120)
 
     spacing_sec = None
     if duration_sec and session_like_target > 0:
@@ -1018,9 +1127,7 @@ async def like_latest_from_search(
                 dom_detached_failure = False
 
                 while attempts < max_attempts:
-                    like_target = await note.query_selector(
-                        "span.like-wrapper, svg.like-icon, .like-wrapper .like-icon"
-                    )
+                    like_target = await _resolve_like_target(note)
                     if like_target is None:
                         note = await _ensure_note_handle(page, note, info) or note
                         attempts += 1
@@ -1827,7 +1934,12 @@ def parse_args(argv: List[str]) -> tuple[BotConfig, Any]:
     parser.add_argument("--long-pause-max-s", dest="long_pause_max_s", type=float, default=10.0, help="Maximum long pause seconds")
     parser.add_argument("--session-cap-min", dest="session_cap_min", type=int, default=0, help="Soft minimum likes per session")
     parser.add_argument("--session-cap-max", dest="session_cap_max", type=int, default=0, help="Soft maximum likes per session")
-    parser.add_argument("--user-agent", dest="user_agent", default=DEFAULT_USER_AGENT, help="Override browser User-Agent string")
+    parser.add_argument(
+        "--user-agent",
+        dest="user_agent",
+        default=None,
+        help="Override browser User-Agent string (defaults to rotation when enabled)",
+    )
     parser.add_argument("--accept-language", dest="accept_language", help="Override Accept-Language / navigator.languages")
     parser.add_argument("--timezone-id", dest="timezone_id", help="Override timezone ID (e.g., Asia/Shanghai)")
     parser.add_argument("--viewport-w", dest="viewport_w", type=int, help="Fixed viewport width")
@@ -1862,6 +1974,8 @@ def parse_args(argv: List[str]) -> tuple[BotConfig, Any]:
     user_agent = ns.user_agent
     if ns.randomize_user_agent and not ns.user_agent:
         user_agent = random.choice(COMMON_USER_AGENTS)
+    if not user_agent:
+        user_agent = DEFAULT_USER_AGENT
 
     comment_texts, comment_buckets = load_comment_library((ns.comment_text_file or "").strip() or None)
 
