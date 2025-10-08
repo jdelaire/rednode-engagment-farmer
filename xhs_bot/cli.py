@@ -30,6 +30,95 @@ COMMON_USER_AGENTS = [
 
 SESSION_LOG_PATH = Path("session_logs.jsonl")
 
+STEALTH_INIT_SCRIPT = r"""
+(() => {
+  const redefine = (object, property, value) => {
+    try {
+      Object.defineProperty(object, property, { get: () => value, configurable: true });
+    } catch (e) {
+      try {
+        object[property] = value;
+      } catch (e2) {}
+    }
+  };
+
+  redefine(Navigator.prototype, 'webdriver', undefined);
+  redefine(Navigator.prototype, 'hardwareConcurrency', Math.max(4, navigator.hardwareConcurrency || 4));
+  redefine(Navigator.prototype, 'deviceMemory', navigator.deviceMemory || 8);
+  if (!navigator.languages || navigator.languages.length === 0) {
+    redefine(Navigator.prototype, 'languages', ['en-US', 'en']);
+  }
+  if (!navigator.language) {
+    redefine(Navigator.prototype, 'language', 'en-US');
+  }
+  redefine(Navigator.prototype, 'maxTouchPoints', navigator.maxTouchPoints || 1);
+  redefine(Navigator.prototype, 'platform', navigator.platform || 'MacIntel');
+
+  if (!window.chrome) {
+    redefine(window, 'chrome', { runtime: {} });
+  }
+
+  try {
+    const originalQuery = navigator.permissions && navigator.permissions.query;
+    if (originalQuery) {
+      navigator.permissions.query = parameters => {
+        const name = parameters && parameters.name;
+        if (name === 'notifications') {
+          const state = typeof Notification !== 'undefined' ? Notification.permission : 'default';
+          return Promise.resolve({ state });
+        }
+        return originalQuery(parameters);
+      };
+    }
+  } catch (e) {}
+
+  try {
+    const pluginArray = () => {
+      const plugins = [
+        { name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+        { name: 'Chromium PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+        { name: 'Microsoft Edge PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+      ];
+      plugins.forEach(plugin => {
+        plugin.length = 1;
+        plugin[0] = {
+          type: 'application/pdf',
+          suffixes: 'pdf',
+          description: 'Portable Document Format',
+        };
+      });
+      plugins.length = plugins.length;
+      return plugins;
+    };
+    redefine(navigator, 'plugins', pluginArray());
+    redefine(navigator, 'mimeTypes', [{ type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format' }]);
+  } catch (e) {}
+
+  try {
+    Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {
+      get: function () {
+        return window;
+      },
+    });
+  } catch (e) {}
+
+  try {
+    const getParameter = WebGLRenderingContext && WebGLRenderingContext.prototype.getParameter;
+    if (getParameter) {
+      WebGLRenderingContext.prototype.getParameter = function (parameter) {
+        if (parameter === 37445) {
+          return 'Intel Inc.';
+        }
+        if (parameter === 37446) {
+          return 'Intel Iris OpenGL Engine';
+        }
+        return getParameter.apply(this, arguments);
+      };
+    }
+  } catch (e) {}
+})();
+"""
+
 DEFAULT_COMMENT_BUCKETS = {
     "low": [
         "Keep showing up and momentum builds",
@@ -133,10 +222,177 @@ def append_session_log(summary: Dict[str, Any]) -> None:
         pass
 
 
+async def apply_latest_filter(page: Page, config: "BotConfig") -> bool:
+    """Hover filter control and click the 最新 tag if it becomes available."""
+    if config.verbose:
+        print("Attempting to select 最新 filter automatically...")
+    filter_locator = page.locator("div.filter").first
+    try:
+        await filter_locator.wait_for(state="visible", timeout=8000)
+    except Exception as exc:
+        if config.verbose:
+            print(f"Filter button not found; fallback to manual selection. ({exc.__class__.__name__})")
+        return False
+    try:
+        await filter_locator.scroll_into_view_if_needed()
+    except Exception:
+        pass
+
+    hover_attempts = 0
+    hovered = False
+    while hover_attempts < 2 and not hovered:
+        hover_attempts += 1
+        try:
+            await filter_locator.hover()
+            hovered = True
+        except Exception as exc:
+            if config.verbose:
+                print(f"Hover attempt {hover_attempts} failed ({exc.__class__.__name__}).")
+            await asyncio.sleep(random.uniform(0.25, 0.4))
+    if hovered:
+        try:
+            bbox = await filter_locator.bounding_box()
+        except Exception:
+            bbox = None
+        if bbox:
+            await page.mouse.move(
+                bbox["x"] + bbox["width"] / 2,
+                bbox["y"] + bbox["height"] / 2,
+            )
+            await asyncio.sleep(random.uniform(0.15, 0.25))
+    else:
+        if config.verbose:
+            print("Failed to hover filter button after retries; fallback to manual selection.")
+        return False
+
+    await asyncio.sleep(random.uniform(0.35, 0.75))
+    wrapper_locator = page.locator(".filters-wrapper").first
+
+    async def wait_for_wrapper(timeout: float) -> bool:
+        try:
+            await page.wait_for_selector(
+                ".filters-wrapper",
+                state="visible",
+                timeout=timeout,
+            )
+            return True
+        except Exception as exc_inner:
+            if config.verbose:
+                print(f"filters-wrapper not visible yet ({exc_inner.__class__.__name__}).")
+            return False
+
+    if not await wait_for_wrapper(4000):
+        if config.verbose:
+            print("Filter options did not appear after hover; trying click.")
+        try:
+            await filter_locator.click()
+            await asyncio.sleep(random.uniform(0.2, 0.4))
+        except Exception as click_exc:
+            if config.verbose:
+                print(f"Filter click fallback failed ({click_exc.__class__.__name__}).")
+        if not await wait_for_wrapper(3000):
+            try:
+                dispatched = await page.evaluate(
+                    """
+                    () => {
+                      const el = document.querySelector('div.filter');
+                      if (!el) return false;
+                      const rect = el.getBoundingClientRect();
+                      const opts = {bubbles: true, cancelable: true, clientX: rect.left + rect.width/2, clientY: rect.top + rect.height/2};
+                      el.dispatchEvent(new MouseEvent('mouseover', opts));
+                      el.dispatchEvent(new MouseEvent('mouseenter', opts));
+                      el.dispatchEvent(new MouseEvent('mousemove', opts));
+                      return true;
+                    }
+                    """
+                )
+                if config.verbose:
+                    print(f"Dispatched synthetic hover events: {dispatched}")
+                await asyncio.sleep(random.uniform(0.25, 0.45))
+            except Exception as synthetic_exc:
+                if config.verbose:
+                    print(
+                        f"Synthetic hover dispatch failed ({synthetic_exc.__class__.__name__})."
+                    )
+            if not await wait_for_wrapper(2500):
+                if config.verbose:
+                    try:
+                        top_html = await page.inner_html(".search-layout__top")
+                        print(f"search-layout__top snippet: {top_html[:200]}")
+                    except Exception:
+                        pass
+                return False
+
+    options_locator = wrapper_locator.locator(
+        ":scope .tags, :scope .tag, :scope .filter-tag, :scope [class*='tag'], :scope button, :scope span, :scope div"
+    )
+    latest_locator = wrapper_locator.locator(
+        ".tags",
+        has=page.locator("span", has_text="最新"),
+    ).first
+    try:
+        await latest_locator.wait_for(state="visible", timeout=2500)
+    except Exception as exc:
+        if config.verbose:
+            try:
+                texts = await wrapper_locator.all_inner_texts()
+            except Exception:
+                texts = []
+            readable = ", ".join(t.strip() for t in texts if t and t.strip())
+            print(f"最新 filter option not found; fallback to manual selection. ({exc.__class__.__name__}) options=[{readable}]")
+        return False
+    try:
+        await latest_locator.click()
+        await asyncio.sleep(random.uniform(0.25, 0.45))
+        activated = False
+        try:
+            await page.wait_for_function(
+                """
+                () => {
+                  const active = document.querySelector('.filters-wrapper .tags.active span');
+                  return !!(active && active.textContent && active.textContent.includes('最新'));
+                }
+                """,
+                timeout=3000,
+            )
+            activated = True
+        except Exception:
+            try:
+                await page.wait_for_function(
+                    """
+                    () => {
+                      const top = document.querySelector('.search-layout__top');
+                      if (!top) return false;
+                      const actives = Array.from(top.querySelectorAll('.tags.active span'));
+                      return actives.some(el => (el.textContent || '').includes('最新'));
+                    }
+                    """,
+                    timeout=2000,
+                )
+                activated = True
+            except Exception:
+                activated = False
+        if activated:
+            if config.verbose:
+                print("Selected 最新 filter via automation.")
+            # small move upward to collapse panel if it remains open
+            try:
+                bbox = await filter_locator.bounding_box()
+            except Exception:
+                bbox = None
+            if bbox:
+                await page.mouse.move(bbox["x"] + bbox["width"] / 2, max(0, bbox["y"] - 60))
+            return True
+    except Exception as click_exc:
+        if config.verbose:
+            print(f"Click on 最新 failed; fallback to manual selection. ({click_exc.__class__.__name__})")
+    return False
+
+
 @dataclass
 class BotConfig:
     user_data_dir: str = DEFAULT_USER_DATA_DIR
-    headless: bool = False
+    headless: bool = True
     slow_mo_ms: int = 50
     locale: str = "en-US"
     verbose: bool = False
@@ -194,26 +450,19 @@ async def create_context(config: BotConfig) -> tuple[Playwright, BrowserContext]
             "width": random.randint(config.viewport_min_w, config.viewport_max_w),
             "height": random.randint(config.viewport_min_h, config.viewport_max_h),
         }
+    launch_args = ["--no-sandbox", "--disable-blink-features=AutomationControlled"]
     browser = await pw.chromium.launch_persistent_context(
         user_data_dir=config.user_data_dir,
         headless=config.headless,
         slow_mo=config.slow_mo_ms,
         locale=config.locale,
         user_agent=config.user_agent,
-        args=["--no-sandbox"],
+        args=launch_args,
         viewport=viewport,
     )
     if config.stealth:
         try:
-            await browser.add_init_script(
-                """
-                () => {
-                  try {
-                    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                  } catch (e) {}
-                }
-                """
-            )
+            await browser.add_init_script(STEALTH_INIT_SCRIPT)
         except Exception:
             pass
     try:
@@ -554,10 +803,18 @@ async def like_latest_from_search(
     base_url = "https://www.xiaohongshu.com"
     search_url = f"{base_url}/search_result/?keyword={quote_plus(keyword)}&source=web_explore_feed&type={search_type}"
     await page.goto(search_url, wait_until="domcontentloaded")
+    try:
+        await page.wait_for_load_state("networkidle", timeout=8000)
+    except Exception:
+        pass
 
-    if config.verbose:
-        print("Waiting 60 seconds so you can switch filters before automation starts...")
-    await asyncio.sleep(60)
+    filter_selected = await apply_latest_filter(page, config)
+    if filter_selected:
+        await asyncio.sleep(random.uniform(2.5, 4.5))
+    else:
+        if config.verbose:
+            print("Waiting 60 seconds so you can switch filters before automation starts...")
+        await asyncio.sleep(60)
 
     start_ts = time.monotonic()
 
@@ -1553,7 +1810,8 @@ def parse_args(argv: List[str]) -> tuple[BotConfig, Any]:
     )
     parser.add_argument("keyword", help="Search keyword to target.")
     parser.add_argument("--user-data", dest="user_data_dir", default=DEFAULT_USER_DATA_DIR, help="Persistent user data dir")
-    parser.add_argument("--headless", action="store_true", help="Run Chromium headless")
+    parser.add_argument("--headless", dest="headless", action="store_true", help="Run Chromium headless")
+    parser.add_argument("--headed", dest="headless", action="store_false", help="Run Chromium headed (disable headless)")
     parser.add_argument("--slow", dest="slow_mo_ms", type=int, default=50, help="Slow motion ms for debugging")
     parser.add_argument("--limit", dest="limit", type=int, default=10, help="Number of posts to like")
     parser.add_argument("--delay-ms", dest="delay_ms", type=int, default=2000, help="Base delay between likes in ms")
@@ -1590,6 +1848,8 @@ def parse_args(argv: List[str]) -> tuple[BotConfig, Any]:
     parser.add_argument("--comment-type-delay-max-ms", dest="comment_type_delay_max_ms", type=int, default=140, help="Maximum per-character typing delay (ms)")
     parser.add_argument("--comment-submit", dest="comment_submit", action="store_true", default=False, help="Submit the comment instead of dry-run typing only")
     parser.add_argument("--verbose", action="store_true", help="Print verbose progress output")
+
+    parser.set_defaults(headless=True)
 
     ns = parser.parse_args(argv)
 

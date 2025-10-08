@@ -49,6 +49,7 @@ fi
 
 # Optional flags: set to non-empty to enable; leave empty to omit
 HEADLESS="${HEADLESS:-}"
+HEADED="${HEADED:-}"
 VERBOSE="${VERBOSE:-1}"
 NO_RANDOM_UA="${NO_RANDOM_UA:-}"
 NO_RANDOM_ORDER="${NO_RANDOM_ORDER:-}"
@@ -88,6 +89,7 @@ xhs-bot like-latest "$KEYWORD" \
   --comment-type-delay-max-ms "$COMMENT_TYPE_DELAY_MAX_MS" \
   ${VERBOSE:+--verbose} \
   ${HEADLESS:+--headless} \
+  ${HEADED:+--headed} \
   ${NO_RANDOM_UA:+--no-random-ua} \
   ${NO_RANDOM_ORDER:+--no-random-order} \
   ${NO_STEALTH:+--no-stealth} \
