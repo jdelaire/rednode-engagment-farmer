@@ -397,6 +397,7 @@ class BotConfig:
     locale: str = "en-US"
     verbose: bool = False
     user_agent: str = DEFAULT_USER_AGENT
+    delay_ms: int = 2000
     delay_jitter_pct: int = 30
     hover_prob: float = 0.6
     stealth: bool = True
@@ -893,6 +894,21 @@ async def like_latest_from_search(
         await asyncio.sleep(60)
 
     start_ts = time.monotonic()
+    session_start_monotonic = start_ts
+
+    async def sleep_after_like() -> None:
+        delay_ms = max(0, getattr(config, "delay_ms", 0))
+        if delay_ms <= 0:
+            return
+        base_delay = delay_ms
+        elapsed = max(0.0, time.monotonic() - session_start_monotonic)
+        ramp_up_s = max(0, getattr(config, "ramp_up_s", 0))
+        if ramp_up_s > 0 and elapsed < ramp_up_s:
+            ramp_factor = 1.0 + (ramp_up_s - elapsed) / ramp_up_s
+            base_delay = int(base_delay * ramp_factor)
+        await asyncio.sleep(
+            draw_delay_seconds(base_delay, config.delay_jitter_pct, config.delay_model)
+        )
 
     async def reload_feed(reason: str) -> bool:
         nonlocal reload_attempts, empty_candidate_rounds, dom_detached_recent
@@ -1216,29 +1232,30 @@ async def like_latest_from_search(
                                 comment_text = choose_comment_text(info, config)
                                 if not comment_text:
                                     comment_was_attempted = False
-                                    continue
-                                comment_attempts += 1
-                                if config.verbose:
-                                    preview = comment_text if len(comment_text) <= 160 else (comment_text[:160] + "...")
-                                    action = "submit" if config.comment_submit else "type (dry-run)"
-                                    print(f"[{now_ts()}] Preparing to {action} comment on {url}: {preview}")
-                                # Prefer opening via card cover click to preserve SPA context and tokens
-                                ok, reason = await try_open_and_type_comment_from_card(
-                                    context, page, note, url, comment_text, config
-                                )
-                                if ok:
-                                    comments_typed += 1
-                                    last_comment_time = time.monotonic()
-                                    if config.verbose:
-                                        preview2 = comment_text if len(comment_text) <= 160 else (comment_text[:160] + "...")
-                                        label = "Submitted" if config.comment_submit else "Typed (dry-run)"
-                                        print(f"[{now_ts()}] {label} comment on {url}: {preview2}")
                                 else:
+                                    comment_attempts += 1
                                     if config.verbose:
-                                        print(f"[{now_ts()}] Comment skipped on {url}: {reason}")
+                                        preview = comment_text if len(comment_text) <= 160 else (comment_text[:160] + "...")
+                                        action = "submit" if config.comment_submit else "type (dry-run)"
+                                        print(f"[{now_ts()}] Preparing to {action} comment on {url}: {preview}")
+                                    # Prefer opening via card cover click to preserve SPA context and tokens
+                                    ok, reason = await try_open_and_type_comment_from_card(
+                                        context, page, note, url, comment_text, config
+                                    )
+                                    if ok:
+                                        comments_typed += 1
+                                        last_comment_time = time.monotonic()
+                                        if config.verbose:
+                                            preview2 = comment_text if len(comment_text) <= 160 else (comment_text[:160] + "...")
+                                            label = "Submitted" if config.comment_submit else "Typed (dry-run)"
+                                            print(f"[{now_ts()}] {label} comment on {url}: {preview2}")
+                                    else:
+                                        if config.verbose:
+                                            print(f"[{now_ts()}] Comment skipped on {url}: {reason}")
                         if not comment_was_attempted:
                             await maybe_preview_note_detail(page, note, info, config)
                         await maybe_take_feed_break(page, config)
+                        await sleep_after_like()
                         break
 
                     if config.verbose:
@@ -1840,7 +1857,6 @@ async def cmd_like_latest(
     config: BotConfig,
     keyword: str,
     limit: int,
-    delay_ms: int,
     search_type: str,
     duration_min: int,
 ) -> int:
@@ -1856,15 +1872,6 @@ async def cmd_like_latest(
             search_type,
             duration_sec=duration_sec,
         )
-        for item in liked:
-            elapsed = time.monotonic()
-            base_delay = delay_ms
-            if config.ramp_up_s > 0 and elapsed < config.ramp_up_s:
-                ramp_factor = 1.0 + (config.ramp_up_s - elapsed) / config.ramp_up_s
-                base_delay = int(base_delay * ramp_factor)
-            await asyncio.sleep(
-                draw_delay_seconds(base_delay, config.delay_jitter_pct, config.delay_model)
-            )
         duration = time.time() - start_time
         total_attempted = len(liked) + len(skipped)
         from collections import Counter
@@ -1985,6 +1992,7 @@ def parse_args(argv: List[str]) -> tuple[BotConfig, Any]:
         slow_mo_ms=ns.slow_mo_ms,
         verbose=ns.verbose,
         user_agent=user_agent,
+        delay_ms=max(0, ns.delay_ms),
         delay_jitter_pct=ns.delay_jitter_pct,
         hover_prob=ns.hover_prob,
         stealth=ns.stealth,
@@ -2035,7 +2043,6 @@ def main(argv: Optional[List[str]] = None) -> int:
             config,
             ns.keyword,
             ns.limit,
-            ns.delay_ms,
             ns.search_type,
             ns.duration_min,
         )
