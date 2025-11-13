@@ -208,6 +208,7 @@ __marimo__/
 
 # bot dat
 LoginInfo/
+.xhs_bot/
 
 # logs
 session_logs.jsonl
