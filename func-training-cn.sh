@@ -1,1 +1,0 @@
-COMMENT_SUBMIT=1 KEYWORD=功能性训练 HEADED=1  ./run.sh

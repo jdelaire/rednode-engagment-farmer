@@ -34,6 +34,28 @@ xhs-bot "crossfit" --limit 5 --headless --delay-ms 1200
 `like-latest` is the only supported command. After navigation the bot pauses for 60 seconds;
 use that window to manually toggle the filter to "最新" (Latest) before the automation starts scrolling.
 
+Local Web Interface
+-------------------
+An experimental local web UI is included to start/stop the bot, view live logs, and sort hashtags by popularity.
+
+Start it quickly via the convenience script:
+
+```bash
+./run.sh
+```
+
+Or run manually inside your venv:
+
+```bash
+python -m xhs_bot.web_server
+```
+
+Open http://127.0.0.1:8000 and fill the form. Use `./LoginInfo` for the user-data directory (so your existing profile is reused). Click Start to launch a session and Stop to cancel. Live logs stream into the page; summaries still append to `session_logs.jsonl`.
+
+Notes:
+- The server auto-opens your browser on start (disable with `XHS_WEB_AUTO_OPEN=0`).
+- The Keyword dropdown supports sorting by “Popularity” (p75 like-count from a quick sample) or A–Z. Click “Refresh popularity” to update cached scores.
+
 Global flags
 ------------
 

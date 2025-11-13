@@ -1,1 +1,0 @@
-COMMENT_SUBMIT=1 KEYWORD=crossfit HEADED=1  ./run.sh

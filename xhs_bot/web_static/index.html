@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>XHS Engagement Bot (Local)</title>
+  <style>
+    /* Rednote-inspired dark theme */
+    :root {
+      --bg: #111113;
+      --card: #18181b;
+      --ink: #f3f4f6;
+      --muted: #a3a3a3;
+      --line: #26262b;
+      --accent: #ff2442;      /* primary red */
+      --accent-600: #e61f3a;  /* hover */
+      --accent-700: #c41b32;  /* active */
+      --chip-bg: rgba(255, 36, 66, 0.1);
+      --chip-br: rgba(255, 36, 66, 0.35);
+      --focus: rgba(255, 36, 66, 0.5);
+    }
+    * { box-sizing: border-box; }
+    body { font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 24px; background: var(--bg); color: var(--ink); }
+    .container { max-width: 1280px; margin: 0 auto; }
+    h1 { font-size: 20px; margin: 0 0 16px; letter-spacing: 0.2px; }
+    .card { background: var(--card); border-radius: 12px; padding: 16px; margin-bottom: 16px; border: 1px solid var(--line); box-shadow: 0 1px 0 rgba(0,0,0,0.25) inset; }
+    label { display: block; margin: 6px 0 6px; font-size: 12px; color: var(--muted); }
+    input[type="text"], input[type="number"], input[type="url"], input[type="password"], select, textarea {
+      width: 100%; padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: #121214; color: var(--ink);
+      outline: none; transition: border-color .15s ease, box-shadow .15s ease;
+    }
+    input[type="text"]:focus, input[type="number"]:focus, select:focus, textarea:focus {
+      border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus);
+    }
+    input[type="checkbox"] { width: auto; height: auto; }
+    .row { display: grid; grid-template-columns: repeat(12, 1fr); gap: 12px; }
+    .col-3 { grid-column: span 3; }
+    .col-4 { grid-column: span 4; }
+    .col-6 { grid-column: span 6; }
+    .col-12 { grid-column: span 12; }
+    @media (max-width: 1100px) { .col-6 { grid-column: span 12; } .col-4 { grid-column: span 6; } }
+    @media (max-width: 720px) { .col-3, .col-4 { grid-column: span 12; } }
+    .btn { background: var(--accent); color: #fff; padding: 10px 14px; border: 0; border-radius: 10px; cursor: pointer; font-weight: 700; box-shadow: 0 2px 0 rgba(0,0,0,0.25); }
+    .btn:hover { background: var(--accent-600); }
+    .btn:active { background: var(--accent-700); }
+    .btn.secondary { background: #2a2a2f; color: #e5e5e5; border: 1px solid var(--line); }
+    .btn.secondary:hover { background: #323238; }
+    .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+    .cluster { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .chip { background: var(--chip-bg); color: #ffd1d7; border: 1px solid var(--chip-br); border-radius: 999px; font-size: 12px; padding: 4px 10px; }
+    pre { background: #0f0f12; color: #d1d1d6; border: 1px solid var(--line); padding: 12px; border-radius: 10px; height: 320px; overflow: auto; font-size: 12px; }
+    details summary { cursor: pointer; color: var(--muted); margin: 6px 0 12px; }
+  </style>
+  <script>
+    let logIndex = 0;
+    let pollTimer = null;
+
+    async function fetchJSON(url, opts) {
+      const res = await fetch(url, opts);
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    }
+
+    async function refreshStatus() {
+      try {
+        const st = await fetchJSON('/status');
+        const running = !!st.running;
+        document.getElementById('running').textContent = running ? 'running' : 'idle';
+        document.getElementById('liked').textContent = st.liked ?? 0;
+        document.getElementById('skipped').textContent = st.skipped ?? 0;
+        const dur = st.duration_sec ? st.duration_sec.toFixed(1) + 's' : '-';
+        document.getElementById('duration').textContent = dur;
+        document.getElementById('startBtn').disabled = running;
+        document.getElementById('stopBtn').disabled = !running;
+      } catch (e) {
+        console.warn('status error', e);
+      }
+    }
+
+    async function pollLogs() {
+      try {
+        const data = await fetchJSON(`/logs?from_index=${logIndex}`);
+        logIndex = data.next || logIndex;
+        const logEl = document.getElementById('logs');
+        for (const line of (data.lines || [])) {
+          logEl.textContent += line + '\n';
+        }
+        logEl.scrollTop = logEl.scrollHeight;
+      } catch (e) {
+        // ignore transient errors
+      }
+    }
+
+    async function startRun(ev) {
+      ev.preventDefault();
+      const kwSelect = document.getElementById('keyword');
+      let keyword = kwSelect.value;
+      if (keyword === '__custom__') {
+        keyword = document.getElementById('keywordCustom').value.trim();
+      }
+      if (!keyword) { alert('Keyword is required'); return; }
+      const payload = {
+        keyword,
+        limit: parseInt(document.getElementById('limit').value || '200', 10),
+        duration_min: parseInt(document.getElementById('duration').value || '210', 10),
+        user_data_dir: document.getElementById('userData').value || '',
+        headless: document.getElementById('headless').checked,
+        like_prob: parseFloat(document.getElementById('likeProb').value || '0.82'),
+        delay_ms: parseInt(document.getElementById('delayMs').value || '4800', 10),
+        delay_jitter_pct: parseInt(document.getElementById('delayJitter').value || '35', 10),
+        delay_model: document.getElementById('delayModel').value || 'gauss',
+        hover_prob: parseFloat(document.getElementById('hoverProb').value || '0.68'),
+        slow_mo_ms: parseInt(document.getElementById('slowMo').value || '85', 10),
+        ramp_up_s: parseInt(document.getElementById('rampUp').value || '45', 10),
+        long_pause_prob: parseFloat(document.getElementById('longPauseProb').value || '0.24'),
+        long_pause_min_s: parseFloat(document.getElementById('longPauseMin').value || '5.0'),
+        long_pause_max_s: parseFloat(document.getElementById('longPauseMax').value || '14.0'),
+        session_cap_min: parseInt(document.getElementById('capMin').value || '120', 10),
+        session_cap_max: parseInt(document.getElementById('capMax').value || '180', 10),
+        human_idle_prob: parseFloat(document.getElementById('idleProb').value || '0.36'),
+        human_idle_min_s: parseFloat(document.getElementById('idleMin').value || '1.8'),
+        human_idle_max_s: parseFloat(document.getElementById('idleMax').value || '5.5'),
+        mouse_wiggle_prob: parseFloat(document.getElementById('wiggleProb').value || '0.5'),
+        randomize_user_agent: !document.getElementById('noRandomUA').checked,
+        random_order: !document.getElementById('noRandomOrder').checked,
+        stealth: !document.getElementById('noStealth').checked,
+        user_agent: document.getElementById('userAgent').value || null,
+        accept_language: document.getElementById('acceptLang').value || null,
+        timezone_id: document.getElementById('tz').value || null,
+        comment_prob: parseFloat(document.getElementById('commentProb').value || '0.08'),
+        comment_max_per_session: parseInt(document.getElementById('commentMax').value || '10', 10),
+        comment_min_interval_s: parseFloat(document.getElementById('commentInterval').value || '300', 10),
+        comment_type_delay_min_ms: parseInt(document.getElementById('commentDelayMin').value || '60', 10),
+        comment_type_delay_max_ms: parseInt(document.getElementById('commentDelayMax').value || '140', 10),
+        comment_submit: document.getElementById('commentSubmit').checked,
+        comment_text_file: document.getElementById('commentFile').value || './models/comments.txt',
+        verbose: document.getElementById('verbose').checked
+      };
+      try {
+        await fetchJSON('/start', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+        document.getElementById('logs').textContent = '';
+        logIndex = 0;
+        await refreshStatus();
+      } catch (e) {
+        alert('Failed to start: ' + e.message);
+      }
+    }
+
+    async function stopRun() {
+      try {
+        await fetchJSON('/stop', { method: 'POST' });
+        await refreshStatus();
+      } catch (e) {
+        console.warn('stop error', e);
+      }
+    }
+
+    async function loadKeywords() {
+      try {
+        const sort = (document.getElementById('sortMode') || { value: 'alpha' }).value;
+        const res = await fetch('/keywords' + (sort === 'pop' ? '?sort=pop' : ''));
+        if (!res.ok) throw new Error('fetch keywords failed');
+        const data = await res.json();
+        const list = Array.isArray(data.keywords) ? data.keywords : [];
+        const scores = data.scores || {};
+        const sel = document.getElementById('keyword');
+        sel.innerHTML = '';
+        for (const kw of list) {
+          const opt = document.createElement('option');
+          opt.value = kw;
+          const p75 = (scores[kw] && (scores[kw].p75 || 0)) || 0;
+          opt.textContent = p75 ? `${kw} — p75: ${p75}` : kw;
+          if (kw.toLowerCase() === 'crossfit') opt.selected = true;
+          sel.appendChild(opt);
+        }
+        const custom = document.createElement('option');
+        custom.value = '__custom__'; custom.textContent = 'Custom…';
+        sel.appendChild(custom);
+        const updated = document.getElementById('popUpdated');
+        if (updated && data.updated_ts) updated.textContent = `Last popularity update: ${data.updated_ts}`;
+      } catch (_) {
+        // fallback defaults
+      }
+    }
+
+    function onKeywordChange() {
+      const sel = document.getElementById('keyword');
+      const customRow = document.getElementById('keywordCustomRow');
+      if (sel.value === '__custom__') customRow.style.display = 'block';
+      else customRow.style.display = 'none';
+    }
+
+    function init() {
+      document.getElementById('startForm').addEventListener('submit', startRun);
+      document.getElementById('stopBtn').addEventListener('click', stopRun);
+      document.getElementById('keyword').addEventListener('change', onKeywordChange);
+      const sortSel = document.getElementById('sortMode');
+      sortSel.addEventListener('change', () => loadKeywords());
+      document.getElementById('refreshPop').addEventListener('click', refreshPopularity);
+      loadKeywords().then(onKeywordChange);
+      pollTimer = setInterval(() => { refreshStatus(); pollLogs(); }, 1000);
+      refreshStatus();
+    }
+
+    async function refreshPopularity() {
+      const btn = document.getElementById('refreshPop');
+      btn.disabled = true; btn.textContent = 'Refreshing…';
+      try {
+        // send current list as hint
+        const options = Array.from(document.getElementById('keyword').options).map(o => o.value).filter(v => v && v !== '__custom__');
+        await fetch('/keywords/refresh', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ keywords: options }) });
+        // poll status until finished
+        let done = false; let tries = 0;
+        while (!done && tries < 600) { // up to 10 minutes
+          await new Promise(r => setTimeout(r, 1000));
+          const st = await (await fetch('/keywords/refresh/status')).json();
+          if (!st.running) done = true;
+        }
+        await loadKeywords();
+      } catch (e) {
+        console.warn('refresh popularity failed', e);
+      } finally {
+        btn.disabled = false; btn.textContent = 'Refresh popularity';
+      }
+    }
+
+    window.addEventListener('DOMContentLoaded', init);
+  </script>
+  </head>
+  <body>
+    <div class="container">
+      <h1>XHS Engagement Bot (Local)</h1>
+
+      <div class="card">
+        <form id="startForm">
+          <div class="row">
+            <div class="col-6">
+              <label>Keyword</label>
+              <select id="keyword"><option>crossfit</option><option value="__custom__">Custom…</option></select>
+            </div>
+            <div class="col-6" id="keywordCustomRow" style="display:none;">
+              <label>Custom Keyword</label>
+              <input id="keywordCustom" type="text" placeholder="type a keyword" />
+            </div>
+            <div class="col-3">
+              <label>Sort</label>
+              <select id="sortMode">
+                <option value="pop" selected>Popularity</option>
+                <option value="alpha">A–Z</option>
+              </select>
+            </div>
+            <div class="col-3" style="display:flex; align-items:flex-end; gap:8px;">
+              <button id="refreshPop" class="btn secondary" type="button">Refresh popularity</button>
+            </div>
+            <div class="col-6" style="display:flex; align-items:flex-end;">
+              <small id="popUpdated" style="color:#9aa0a6;">&nbsp;</small>
+            </div>
+            <div class="col-6">
+              <label>User Data Dir</label>
+              <input id="userData" type="text" placeholder="./LoginInfo" value="./LoginInfo" />
+            </div>
+            <div class="col-3">
+              <label>Limit</label>
+              <input id="limit" type="number" min="1" max="500" value="200" />
+            </div>
+            <div class="col-3">
+              <label>Duration (min, optional)</label>
+              <input id="duration" type="number" min="0" max="600" value="210" />
+            </div>
+            <div class="col-3">
+              <label>Like Prob</label>
+              <input id="likeProb" type="number" min="0" max="1" step="0.01" value="0.82" />
+            </div>
+            <div class="col-3">
+              <label>Delay (ms)</label>
+              <input id="delayMs" type="number" min="0" max="20000" value="4800" />
+            </div>
+          </div>
+          <div class="cluster" style="margin-top:8px;">
+            <label class="cluster" style="gap:6px;">
+              <input id="headless" type="checkbox" /> Headless
+            </label>
+            <label class="cluster" style="gap:6px;">
+              <input id="verbose" type="checkbox" checked /> Verbose
+            </label>
+            <button id="startBtn" class="btn" type="submit">Start</button>
+            <button id="stopBtn" class="btn secondary" type="button" disabled>Stop</button>
+            <span class="chip">Status: <strong id="running">idle</strong></span>
+            <span class="chip">Liked <span id="liked">0</span></span>
+            <span class="chip">Skipped <span id="skipped">0</span></span>
+            <span class="chip">Elapsed <span id="duration">-</span></span>
+          </div>
+
+          <details style="margin-top:10px;">
+            <summary>Advanced options</summary>
+            <div class="row">
+              <div class="col-3">
+                <label>Hover Prob</label>
+                <input id="hoverProb" type="number" min="0" max="1" step="0.01" value="0.68" />
+              </div>
+              <div class="col-3">
+                <label>Delay Jitter %</label>
+                <input id="delayJitter" type="number" min="0" max="100" value="35" />
+              </div>
+              <div class="col-3">
+                <label>Delay Model</label>
+                <select id="delayModel">
+                  <option value="gauss" selected>gauss</option>
+                  <option value="uniform">uniform</option>
+                  <option value="lognorm">lognorm</option>
+                </select>
+              </div>
+              <div class="col-3">
+                <label>Slow Mo (ms)</label>
+                <input id="slowMo" type="number" min="0" max="500" value="85" />
+              </div>
+            </div>
+            <div class="row">
+              <div class="col-3">
+                <label>Ramp Up (s)</label>
+                <input id="rampUp" type="number" min="0" max="300" value="45" />
+              </div>
+              <div class="col-3">
+                <label>Long Pause Prob</label>
+                <input id="longPauseProb" type="number" min="0" max="1" step="0.01" value="0.24" />
+              </div>
+              <div class="col-3">
+                <label>Long Pause Min (s)</label>
+                <input id="longPauseMin" type="number" min="0" max="60" step="0.1" value="5.0" />
+              </div>
+              <div class="col-3">
+                <label>Long Pause Max (s)</label>
+                <input id="longPauseMax" type="number" min="0" max="120" step="0.1" value="14.0" />
+              </div>
+            </div>
+            <div class="row">
+              <div class="col-3">
+                <label>Session Cap Min</label>
+                <input id="capMin" type="number" min="0" max="10000" value="120" />
+              </div>
+              <div class="col-3">
+                <label>Session Cap Max</label>
+                <input id="capMax" type="number" min="0" max="10000" value="180" />
+              </div>
+              <div class="col-3">
+                <label>Human Idle Prob</label>
+                <input id="idleProb" type="number" min="0" max="1" step="0.01" value="0.36" />
+              </div>
+              <div class="col-3">
+                <label>Mouse Wiggle Prob</label>
+                <input id="wiggleProb" type="number" min="0" max="1" step="0.01" value="0.5" />
+              </div>
+            </div>
+            <div class="row">
+              <div class="col-3">
+                <label>Idle Min (s)</label>
+                <input id="idleMin" type="number" min="0" max="30" step="0.1" value="1.8" />
+              </div>
+              <div class="col-3">
+                <label>Idle Max (s)</label>
+                <input id="idleMax" type="number" min="0" max="60" step="0.1" value="5.5" />
+              </div>
+              <div class="col-3">
+                <label>Comment Prob</label>
+                <input id="commentProb" type="number" min="0" max="1" step="0.01" value="0.08" />
+              </div>
+              <div class="col-3" style="display:flex; align-items:center; gap:8px; padding-top:18px;">
+                <input id="commentSubmit" type="checkbox" checked /> <label for="commentSubmit">Submit Comments</label>
+              </div>
+            </div>
+            <div class="row">
+              <div class="col-4">
+                <label>Comment Max/Session</label>
+                <input id="commentMax" type="number" min="0" max="100" value="10" />
+              </div>
+              <div class="col-4">
+                <label>Comment Min Interval (s)</label>
+                <input id="commentInterval" type="number" min="0" max="3600" value="300" />
+              </div>
+              <div class="col-4">
+                <label>Comment Type Delay Min (ms)</label>
+                <input id="commentDelayMin" type="number" min="0" max="1000" value="60" />
+              </div>
+            </div>
+            <div class="row">
+              <div class="col-4">
+                <label>Comment Type Delay Max (ms)</label>
+                <input id="commentDelayMax" type="number" min="0" max="1000" value="140" />
+              </div>
+              <div class="col-4">
+                <label>Comment Text File</label>
+                <input id="commentFile" type="text" value="./models/comments.txt" />
+              </div>
+              <div class="col-4">
+                <label>User-Agent (optional)</label>
+                <input id="userAgent" type="text" placeholder="override UA" />
+              </div>
+            </div>
+            <div class="row">
+              <div class="col-4">
+                <label>Accept-Language (optional)</label>
+                <input id="acceptLang" type="text" placeholder="e.g. zh-CN,zh,en-US" />
+              </div>
+              <div class="col-4">
+                <label>Timezone ID (optional)</label>
+                <input id="tz" type="text" placeholder="e.g. Asia/Shanghai" />
+              </div>
+            </div>
+            <div class="row">
+              <div class="col-4" style="display:flex; align-items:center; gap:8px;">
+                <input id="noRandomUA" type="checkbox" /> <label for="noRandomUA">Disable Random UA</label>
+              </div>
+              <div class="col-4" style="display:flex; align-items:center; gap:8px;">
+                <input id="noRandomOrder" type="checkbox" /> <label for="noRandomOrder">Disable Random Order</label>
+              </div>
+              <div class="col-4" style="display:flex; align-items:center; gap:8px;">
+                <input id="noStealth" type="checkbox" /> <label for="noStealth">Disable Stealth</label>
+              </div>
+            </div>
+          </details>
+        </form>
+      </div>
+
+      <div class="card">
+        <label>Logs</label>
+        <pre id="logs"></pre>
+        <small>Summaries also append to session_logs.jsonl in the repo root.</small>
+      </div>
+    </div>
+  </body>
+  </html>

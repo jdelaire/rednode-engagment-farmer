@@ -1,1 +1,0 @@
-COMMENT_SUBMIT=1 KEYWORD=CrossFit训练 HEADED=1  ./run.sh

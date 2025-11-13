@@ -7,10 +7,10 @@ The automation loop lives in `xhs_bot/cli.py`; it exports a single `like-latest`
 - `python -m venv .venv && source .venv/bin/activate`: create an isolated environment.
 - `pip install -e . && playwright install chromium`: install editable package and browser deps.
 - `xhs-bot like-latest "keyword" --headless --limit 5 --user-data ./LoginInfo`: smoke-test the engagement flow.
-- `./run.sh`: orchestrated like-latest run with environment overrides (e.g. `KEYWORD="yoga"`).
+- `./run.sh`: start the local web interface (auto-installs FastAPI/uvicorn if needed and opens your browser).
 
 ## Coding Style & Naming Conventions
-Use Python 3.9+ with 4-space indentation, type hints, and dataclasses for configuration objects. Prefer descriptive snake_case for functions/variables and keep CLI argument names kebab-case to match existing flags. Long Playwright selectors should remain readable by grouping heuristics in clearly labelled blocks inside `like_latest_from_search`. Keep user-agent lists and human idle helpers near the top of the module to simplify tuning.
+Use Python 3.9+ with 4-space indentation, type hints, and dataclasses for configuration objects. Prefer descriptive snake_case for functions/variables and keep CLI argument names kebab-case to match existing flags. Long Playwright selectors should remain readable by grouping heuristics in clearly labelled blocks inside `like_latest_from_search`. Keep user-agent lists and human idle helpers near the top of the module to simplify tuning. The web server lives in `xhs_bot/web_server.py` with static assets under `xhs_bot/web_static/`.
 
 ## Testing Guidelines
 Automated tests are not yet in the repo; when adding logic, factor pure helpers to enable future `pytest` coverage. Before submitting changes, run `xhs-bot like-latest "smoke" --limit 3 --verbose` in headed mode, use the initial 60-second pause to switch the filter to "最新", and confirm at least one like succeeds. Capture console logs to verify human-idle events, skip reasons, user-agent rotation, and other heuristics. If you modify heuristics, document the manual scenarios exercised (e.g., app-only note skipped, already-liked card detected, cards hitting the `dom-detached` retry path) and attach the JSON summary emitted at the end of the run, highlighting any `error_examples` entries and the final `session_state`.
