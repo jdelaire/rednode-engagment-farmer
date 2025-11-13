@@ -27,6 +27,8 @@ from .cli import (
     DEFAULT_USER_AGENT,
     SESSION_LOG_PATH,
     create_context,
+    apply_latest_filter,
+    _detect_block_state,
 )
 from urllib.parse import quote_plus
 
@@ -415,7 +417,40 @@ class PopularityManager:
                 try:
                     url = f"https://www.xiaohongshu.com/search_result/?keyword={quote_plus(kw)}&type=51"
                     await page.goto(url, wait_until="domcontentloaded")
-                    await asyncio.sleep(1.0)
+                    # Give the page time to render cards
+                    await asyncio.sleep(1.5)
+                    # Quick block/state check
+                    try:
+                        state = await _detect_block_state(page)  # type: ignore
+                    except Exception:
+                        state = None
+                    if state in {"login-required", "rate-limit"}:
+                        self.data.setdefault("keywords", {})[kw] = {
+                            "ts": _now_iso(),
+                            "sample_n": 0,
+                            "median": 0,
+                            "p75": 0,
+                            "error": str(state),
+                        }
+                        self.progress += 1
+                        await asyncio.sleep(0.5)
+                        continue
+                    # Try ensure filter panel isn't blocking and cards are visible
+                    try:
+                        await page.wait_for_selector('section.note-item', timeout=4000)
+                    except Exception:
+                        # light scroll to trigger lazy load
+                        try:
+                            for _ in range(3):
+                                await page.mouse.wheel(0, 1400)
+                                await asyncio.sleep(0.6)
+                        except Exception:
+                            pass
+                    # As a last resort, attempt to hover filter area and select 最新
+                    try:
+                        await apply_latest_filter(page, cfg)  # type: ignore
+                    except Exception:
+                        pass
                     # collect like counts from visible cards
                     counts = await page.evaluate(
                         r"""
@@ -436,6 +471,7 @@ class PopularityManager:
                             let v = null;
                             if (c) v = parseCount(c.textContent || '');
                             if (v == null) v = parseCount(n.getAttribute('data-like-count'));
+                            if (v == null) v = parseCount((n.getAttribute('aria-label') || ''));
                             if (v != null && !Number.isNaN(v)) likes.push(v);
                           }
                           return likes;
