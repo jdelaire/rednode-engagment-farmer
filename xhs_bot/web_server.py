@@ -82,6 +82,8 @@ class RunStatus:
     liked: int = 0
     skipped: int = 0
     params: Optional[RunParams] = None
+    last_liked_url: Optional[str] = None
+    last_liked_title: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -95,6 +97,8 @@ class RunStatus:
             "liked": self.liked,
             "skipped": self.skipped,
             "params": self.params.__dict__ if self.params else None,
+            "last_liked_url": self.last_liked_url,
+            "last_liked_title": self.last_liked_title,
         }
 
 
@@ -145,6 +149,14 @@ class RunManager:
         l = line.strip()
         if l.startswith("[") and "] Liked:" in l:
             self._status.liked += 1
+            # extract URL and optional title if present
+            try:
+                # formats like: [ts] Liked: URL
+                after = l.split("Liked:", 1)[1].strip()
+                url = after.split()[0]
+                self._status.last_liked_url = url
+            except Exception:
+                pass
         elif l.startswith("Skipped ") or l.startswith("[") and "] Skipped" in l:
             self._status.skipped += 1
         self._logs.append((idx, line))

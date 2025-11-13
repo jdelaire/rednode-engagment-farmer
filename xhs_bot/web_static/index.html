@@ -72,6 +72,14 @@
         document.getElementById('duration').textContent = dur;
         document.getElementById('startBtn').disabled = running;
         document.getElementById('stopBtn').disabled = !running;
+        const last = document.getElementById('lastLiked');
+        const lastA = document.getElementById('lastLikedLink');
+        if (st.last_liked_url) {
+          last.textContent = st.last_liked_title ? st.last_liked_title : st.last_liked_url;
+          lastA.href = st.last_liked_url; lastA.style.display = 'inline';
+        } else {
+          last.textContent = '—'; lastA.style.display = 'none';
+        }
       } catch (e) {
         console.warn('status error', e);
       }
@@ -289,6 +297,16 @@
             <span class="chip">Liked <span id="liked">0</span></span>
             <span class="chip">Skipped <span id="skipped">0</span></span>
             <span class="chip">Elapsed <span id="duration">-</span></span>
+          </div>
+
+          <div class="row" style="margin-top:8px;">
+            <div class="col-12">
+              <label>Latest liked</label>
+              <div class="cluster">
+                <span id="lastLiked">—</span>
+                <a id="lastLikedLink" href="#" target="_blank" class="btn secondary" style="display:none;">Open</a>
+              </div>
+            </div>
           </div>
 
           <details style="margin-top:10px;">
