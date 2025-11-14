@@ -59,10 +59,10 @@ class RunParams:
     mouse_wiggle_prob: float = 0.5
     random_order: bool = True
     stealth: bool = True
-    randomize_user_agent: bool = True
-    user_agent: Optional[str] = None
+    randomize_user_agent: bool = False
+    user_agent: Optional[str] = DEFAULT_USER_AGENT
     accept_language: Optional[str] = None
-    timezone_id: Optional[str] = None
+    timezone_id: Optional[str] = "Asia/Bangkok"
     comment_prob: float = 0.08
     comment_max_per_session: int = 10
     comment_min_interval_s: float = 300.0
@@ -174,8 +174,18 @@ class RunManager:
 
             async def runner() -> None:
                 # Prepare config from params
-                # Resolve user agent with rotation if not set
-                ua = params.user_agent if params.user_agent else DEFAULT_USER_AGENT
+                # Resolve user agent with rotation if requested
+                ua = params.user_agent
+                if params.randomize_user_agent and not ua:
+                    from .cli import COMMON_USER_AGENTS  # lazy import to avoid cycles
+                    import random as _random
+                    ua = _random.choice(COMMON_USER_AGENTS)
+                if not ua:
+                    ua = DEFAULT_USER_AGENT
+                # Resolve locale/timezone defaults from host if not provided
+                from .cli import guess_default_accept_language, guess_default_timezone_id
+                accept_lang = params.accept_language or guess_default_accept_language()
+                tzid = params.timezone_id or os.getenv("XHS_TIMEZONE_ID") or "Asia/Bangkok" or guess_default_timezone_id()
                 cfg = BotConfig(
                     user_data_dir=params.user_data_dir,
                     headless=params.headless,
@@ -193,8 +203,8 @@ class RunManager:
                     long_pause_prob=params.long_pause_prob,
                     long_pause_min_s=params.long_pause_min_s,
                     long_pause_max_s=params.long_pause_max_s,
-                    accept_language=params.accept_language,
-                    timezone_id=params.timezone_id,
+                    accept_language=accept_lang,
+                    timezone_id=tzid,
                     session_cap_min=params.session_cap_min,
                     session_cap_max=params.session_cap_max,
                     randomize_user_agent=params.randomize_user_agent,

@@ -8,6 +8,7 @@ import random
 import time
 from datetime import datetime
 import math
+import os
 
 from urllib.parse import quote_plus
 
@@ -15,14 +16,14 @@ from playwright.async_api import async_playwright, BrowserContext, Page, Playwri
 
 DEFAULT_USER_DATA_DIR = str(Path.home() / ".xhs_bot" / "user_data")
 DEFAULT_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/126.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+    "Version/17.5 Safari/605.1.15"
 )
 
 COMMON_USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.114 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.114 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.76 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.118 Safari/537.36",
@@ -118,6 +119,43 @@ STEALTH_INIT_SCRIPT = r"""
   } catch (e) {}
 })();
 """
+
+
+def guess_default_accept_language() -> str:
+    """Best-effort Accept-Language from system locale.
+    Falls back to en-US,en;q=0.9.
+    """
+    try:
+        import locale
+
+        lang, _enc = locale.getdefaultlocale()  # type: ignore
+        if not lang:
+            return "en-US,en;q=0.9"
+        primary = lang.replace("_", "-")
+        base = primary.split("-")[0]
+        if base and base.lower() != primary.lower():
+            return f"{primary},{base};q=0.9"
+        return f"{primary},{base};q=0.9" if base else primary
+    except Exception:
+        return "en-US,en;q=0.9"
+
+
+def guess_default_timezone_id() -> Optional[str]:
+    """Best-effort IANA timezone name from the system.
+    Returns None if an IANA-like name cannot be determined.
+    """
+    try:
+        from datetime import datetime
+
+        tzinfo = datetime.now().astimezone().tzinfo
+        if not tzinfo:
+            return None
+        key = getattr(tzinfo, "key", None) or getattr(tzinfo, "zone", None)
+        if isinstance(key, str) and "/" in key:
+            return key
+        return None
+    except Exception:
+        return None
 
 DEFAULT_COMMENT_BUCKETS = {
     "low": [
@@ -1945,15 +1983,17 @@ def parse_args(argv: List[str]) -> tuple[BotConfig, Any]:
         "--user-agent",
         dest="user_agent",
         default=None,
-        help="Override browser User-Agent string (defaults to rotation when enabled)",
+        help="Override browser User-Agent string (defaults to pinned macOS Safari)",
     )
-    parser.add_argument("--accept-language", dest="accept_language", help="Override Accept-Language / navigator.languages")
-    parser.add_argument("--timezone-id", dest="timezone_id", help="Override timezone ID (e.g., Asia/Shanghai)")
+    parser.add_argument("--accept-language", dest="accept_language", default=None, help="Override Accept-Language / navigator.languages (defaults to system locale)")
+    parser.add_argument("--timezone-id", dest="timezone_id", default=None, help="Override timezone ID (e.g., America/Los_Angeles; defaults to system timezone if available)")
     parser.add_argument("--viewport-w", dest="viewport_w", type=int, help="Fixed viewport width")
     parser.add_argument("--viewport-h", dest="viewport_h", type=int, help="Fixed viewport height")
     parser.add_argument("--no-stealth", dest="stealth", action="store_false", default=True, help="Disable stealth init scripts")
     parser.add_argument("--no-random-order", dest="random_order", action="store_false", help="Disable randomization of processing order")
-    parser.add_argument("--no-random-ua", dest="randomize_user_agent", action="store_false", default=True, help="Disable automatic user-agent rotation")
+    # Rotation disabled by default; provide both toggles for convenience
+    parser.add_argument("--random-ua", dest="randomize_user_agent", action="store_true", help="Enable automatic user-agent rotation")
+    parser.add_argument("--no-random-ua", dest="randomize_user_agent", action="store_false", help="Disable automatic user-agent rotation")
     parser.add_argument("--human-idle-prob", dest="human_idle_prob", type=float, default=0.25, help="Chance to pause like a human between cards")
     parser.add_argument("--human-idle-min-s", dest="human_idle_min_s", type=float, default=1.5, help="Minimum pause length when idling")
     parser.add_argument("--human-idle-max-s", dest="human_idle_max_s", type=float, default=4.5, help="Maximum pause length when idling")
@@ -1968,7 +2008,7 @@ def parse_args(argv: List[str]) -> tuple[BotConfig, Any]:
     parser.add_argument("--comment-submit", dest="comment_submit", action="store_true", default=False, help="Submit the comment instead of dry-run typing only")
     parser.add_argument("--verbose", action="store_true", help="Print verbose progress output")
 
-    parser.set_defaults(headless=True)
+    parser.set_defaults(headless=True, randomize_user_agent=False)
 
     ns = parser.parse_args(argv)
 
@@ -1983,6 +2023,10 @@ def parse_args(argv: List[str]) -> tuple[BotConfig, Any]:
         user_agent = random.choice(COMMON_USER_AGENTS)
     if not user_agent:
         user_agent = DEFAULT_USER_AGENT
+
+    # Defaults that mirror local machine when not provided
+    accept_language = ns.accept_language or guess_default_accept_language()
+    timezone_id = ns.timezone_id or os.getenv("XHS_TIMEZONE_ID") or "Asia/Bangkok"
 
     comment_texts, comment_buckets = load_comment_library((ns.comment_text_file or "").strip() or None)
 
@@ -2008,8 +2052,8 @@ def parse_args(argv: List[str]) -> tuple[BotConfig, Any]:
         viewport_max_w=viewport_w or 1600,
         viewport_min_h=viewport_h or 720,
         viewport_max_h=viewport_h or 1000,
-        accept_language=ns.accept_language,
-        timezone_id=ns.timezone_id,
+        accept_language=accept_language,
+        timezone_id=timezone_id,
         session_cap_min=ns.session_cap_min,
         session_cap_max=ns.session_cap_max,
         randomize_user_agent=ns.randomize_user_agent,

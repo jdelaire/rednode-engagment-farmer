@@ -208,6 +208,19 @@
       loadKeywords().then(onKeywordChange);
       pollTimer = setInterval(() => { refreshStatus(); pollLogs(); }, 1000);
       refreshStatus();
+      // Prefill Accept-Language / Timezone from browser; keep UA rotation disabled by default
+      try {
+        const lang = navigator.language || 'en-US';
+        const base = (lang.split('-')[0] || 'en');
+        const accept = `${lang},${base};q=0.9`;
+        const tz = (Intl.DateTimeFormat().resolvedOptions().timeZone || '');
+        const acceptEl = document.getElementById('acceptLang');
+        const tzEl = document.getElementById('tz');
+        if (acceptEl && !acceptEl.value) acceptEl.value = accept;
+        if (tzEl && !tzEl.value) tzEl.value = tz;
+        const noRandomUA = document.getElementById('noRandomUA');
+        if (noRandomUA) noRandomUA.checked = true;
+      } catch (_) {}
     }
 
     async function refreshPopularity() {
@@ -411,7 +424,7 @@
               </div>
               <div class="col-4">
                 <label>User-Agent (optional)</label>
-                <input id="userAgent" type="text" placeholder="override UA" />
+                <input id="userAgent" type="text" placeholder="override UA (defaults to macOS Safari)" />
               </div>
             </div>
             <div class="row">
@@ -421,12 +434,12 @@
               </div>
               <div class="col-4">
                 <label>Timezone ID (optional)</label>
-                <input id="tz" type="text" placeholder="e.g. Asia/Shanghai" />
+                <input id="tz" type="text" placeholder="e.g. Asia/Shanghai" value="Asia/Bangkok" />
               </div>
             </div>
             <div class="row">
               <div class="col-4" style="display:flex; align-items:center; gap:8px;">
-                <input id="noRandomUA" type="checkbox" /> <label for="noRandomUA">Disable Random UA</label>
+                <input id="noRandomUA" type="checkbox" checked /> <label for="noRandomUA">Disable Random UA</label>
               </div>
               <div class="col-4" style="display:flex; align-items:center; gap:8px;">
                 <input id="noRandomOrder" type="checkbox" /> <label for="noRandomOrder">Disable Random Order</label>

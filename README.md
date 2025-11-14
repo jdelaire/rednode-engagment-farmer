@@ -70,11 +70,11 @@ Global flags
 - `--like-prob <0..1>` / `--hover-prob <0..1>`: Control how many cards are liked and whether to hover before clicking
 - `--ramp-up-s`, `--long-pause-prob`, `--long-pause-min-s`, `--long-pause-max-s`: Pace controls for slow starts and occasional breaks
 - `--session-cap-min`, `--session-cap-max`: Soft range for the number of likes in a run
-- `--user-agent`, `--accept-language`, `--timezone-id`: Browser fingerprint overrides (user-agent rotates automatically unless `--no-random-ua` is set)
+- `--user-agent`, `--accept-language`, `--timezone-id`: Browser fingerprint overrides (defaults: pinned macOS Safari UA, Accept-Language from locale, timezone defaults to `Asia/Bangkok` unless overridden)
 - `--viewport-w`, `--viewport-h`: Fix viewport size; omit to keep random sizing
 - `--no-stealth`: Disable stealth tweaks (Playwright exposes `navigator.webdriver`)
 - `--no-random-order`: Process cards in the order they appear
-- `--no-random-ua`: Pin the default Chromium user-agent instead of rotating per run
+- `--random-ua` / `--no-random-ua`: Enable/disable rotating desktop user-agents (rotation is disabled by default; UA is pinned to macOS Safari unless overridden)
 - `--human-idle-prob`, `--human-idle-min-s`, `--human-idle-max-s`: Control human-style pauses between interactions
 - `--mouse-wiggle-prob`: Chance to wiggle the cursor during idle pauses
 - `--verbose`: Print progress logs for each like
@@ -91,7 +91,7 @@ Notes
 - Between likes the automation sometimes lingers on the feed, scrolls back to earlier cards, or opens a note briefly without interacting to mimic a curious human.
 - If the feed dries up or the bot sees a burst of `dom-detached` errors, it auto-reloads the search results and records the event in the session log.
 - Comment text is chosen from buckets in `models/comments.txt`; add lines like `low|Your fresh grind looks great` or `high|This set is pure power` to steer what gets posted for low-, mid-, and high-engagement notes.
-- Each run randomizes viewport size and, by default, rotates between a small set of desktop user-agents and inserts human-style reading pauses to lower automation fingerprints.
+- Each run randomizes viewport size and inserts human-style reading pauses. User-agent rotation is now opt-in; by default the UA is pinned to a macOS Safari string. The default timezone is `Asia/Bangkok`.
 - Session summaries are appended to `session_logs.jsonl` (in the current working directory) so you can review engagement history over time.
 - At the end of a session the CLI emits a JSON summary with counts for liked/skipped posts, error breakdowns, the final `session_state`, and sample error details (type + message). Capture this output when tuning heuristics.
 - Feed reflows occasionally detach card nodes mid-click; the bot retries up to three times and records a `dom-detached` skip if the element keeps disappearing so you can monitor instability.

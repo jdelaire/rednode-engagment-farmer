@@ -26,3 +26,4 @@ Never commit personal cookies or Playwright profiles; ensure `LoginInfo/` and `.
 - Feed browsing is more varied: sessions now insert occasional dwell pauses, reverse scrolls, and brief note previews without immediate engagement to soften automation fingerprints.
 - Resilience guardrails reload the feed when selectors dry up or repeated `dom-detached` skips occur, logging the recovery so you can monitor drift.
 - Comment selection is bucketed: add `low|`, `mid|`, or `high|` prefixes in `models/comments.txt` to steer messaging by the note’s visible like count.
+- User-agent rotation is now opt-in; default fingerprints align with macOS Safari, Accept-Language from your locale, and timezone defaulting to Asia/Bangkok (override via flag or `XHS_TIMEZONE_ID`).
