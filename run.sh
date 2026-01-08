@@ -19,8 +19,8 @@ source "${SCRIPT_DIR}/.venv/bin/activate"
 # Install web extras if FastAPI is missing
 if ! python3 -c "import fastapi" >/dev/null 2>&1; then
   echo "Installing package and web extras..."
-  pip install -U pip setuptools wheel >/dev/null
-  pip install -e .[web]
+  python3 -m pip install -U pip setuptools wheel >/dev/null
+  python3 -m pip install -e .[web]
 fi
 
 # Ensure Playwright browser installed (no-op if already present)
@@ -30,4 +30,4 @@ export XHS_WEB_AUTO_OPEN
 
 echo "Starting XHS web UI on http://${HOST}:${PORT} ..."
 # Note: host/port are currently defined in the server. This script keeps envs for future overrides.
-exec python -m xhs_bot.web_server
+exec python3 -m xhs_bot.web_server
