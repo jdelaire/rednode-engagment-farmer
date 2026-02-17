@@ -54,6 +54,8 @@ Open http://127.0.0.1:8000 and fill the form. Use `./LoginInfo` for the user-dat
 
 Notes:
 - The server auto-opens your browser on start (disable with `XHS_WEB_AUTO_OPEN=0`).
+- Telegram notifications are supported in web runs via env vars: set `XHS_TELEGRAM_BOT_TOKEN` and `XHS_TELEGRAM_CHAT_ID`.
+- In Advanced options, use `Test Telegram` to verify token/chat-id delivery before starting a run.
 - The Keyword dropdown supports sorting by “Popularity” (p75 like-count from a quick sample) or A–Z. Click “Refresh popularity” to update cached scores.
 
 Global flags
@@ -77,6 +79,7 @@ Global flags
 - `--random-ua` / `--no-random-ua`: Enable/disable rotating desktop user-agents (rotation is disabled by default; UA is pinned to macOS Safari unless overridden)
 - `--human-idle-prob`, `--human-idle-min-s`, `--human-idle-max-s`: Control human-style pauses between interactions
 - `--mouse-wiggle-prob`: Chance to wiggle the cursor during idle pauses
+- `--telegram-bot-token`, `--telegram-chat-id`: Send cycle-finished summary to Telegram (`XHS_TELEGRAM_BOT_TOKEN` / `XHS_TELEGRAM_CHAT_ID` env vars are also supported)
 - `--verbose`: Print progress logs for each like
 
 Notes

@@ -142,6 +142,8 @@
         comment_type_delay_max_ms: parseInt(document.getElementById('commentDelayMax').value || '140', 10),
         comment_submit: document.getElementById('commentSubmit').checked,
         comment_text_file: document.getElementById('commentFile').value || './models/comments.txt',
+        telegram_bot_token: (document.getElementById('telegramBotToken').value || '').trim() || null,
+        telegram_chat_id: (document.getElementById('telegramChatId').value || '').trim() || null,
         verbose: document.getElementById('verbose').checked
       };
       try {
@@ -151,6 +153,32 @@
         await refreshStatus();
       } catch (e) {
         alert('Failed to start: ' + e.message);
+      }
+    }
+
+    async function testTelegram() {
+      const btn = document.getElementById('testTelegramBtn');
+      const statusEl = document.getElementById('telegramTestStatus');
+      const payload = {
+        telegram_bot_token: (document.getElementById('telegramBotToken').value || '').trim() || null,
+        telegram_chat_id: (document.getElementById('telegramChatId').value || '').trim() || null,
+      };
+      btn.disabled = true;
+      statusEl.textContent = 'Testing...';
+      statusEl.style.color = 'var(--muted)';
+      try {
+        const res = await fetchJSON('/telegram/test', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify(payload),
+        });
+        statusEl.textContent = (res && res.detail) ? res.detail : 'Telegram test sent.';
+        statusEl.style.color = '#86efac';
+      } catch (e) {
+        statusEl.textContent = 'Test failed: ' + (e.message || 'unknown error');
+        statusEl.style.color = '#fda4af';
+      } finally {
+        btn.disabled = false;
       }
     }
 
@@ -205,6 +233,7 @@
       const sortSel = document.getElementById('sortMode');
       sortSel.addEventListener('change', () => loadKeywords());
       document.getElementById('refreshPop').addEventListener('click', refreshPopularity);
+      document.getElementById('testTelegramBtn').addEventListener('click', testTelegram);
       loadKeywords().then(onKeywordChange);
       pollTimer = setInterval(() => { refreshStatus(); pollLogs(); }, 1000);
       refreshStatus();
@@ -435,6 +464,22 @@
               <div class="col-4">
                 <label>Timezone ID (optional)</label>
                 <input id="tz" type="text" placeholder="e.g. Asia/Shanghai" value="Asia/Bangkok" />
+              </div>
+              <div class="col-4">
+                <label>Telegram Chat ID (optional)</label>
+                <input id="telegramChatId" type="text" placeholder="leave empty to use .env" />
+              </div>
+            </div>
+            <div class="row">
+              <div class="col-8">
+                <label>Telegram Bot Token (optional)</label>
+                <input id="telegramBotToken" type="password" placeholder="leave empty to use .env" />
+              </div>
+              <div class="col-4" style="display:flex; align-items:flex-end; gap:8px;">
+                <button id="testTelegramBtn" class="btn secondary" type="button">Test Telegram</button>
+              </div>
+              <div class="col-12">
+                <small id="telegramTestStatus" style="color:var(--muted);">Set token/chat ID above or leave empty to use .env values.</small>
               </div>
             </div>
             <div class="row">

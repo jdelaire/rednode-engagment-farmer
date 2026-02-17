@@ -29,6 +29,7 @@ from .cli import (
     create_context,
     apply_latest_filter,
     _detect_block_state,
+    send_telegram_text,
 )
 from urllib.parse import quote_plus
 
@@ -70,6 +71,8 @@ class RunParams:
     comment_type_delay_max_ms: int = 140
     comment_submit: bool = True  # crossfit.sh sets COMMENT_SUBMIT=1
     comment_text_file: str = str(Path(__file__).resolve().parent.parent / "models" / "comments.txt")
+    telegram_bot_token: Optional[str] = None
+    telegram_chat_id: Optional[str] = None
     verbose: bool = True
 
 
@@ -212,6 +215,8 @@ class RunManager:
                     human_idle_min_s=params.human_idle_min_s,
                     human_idle_max_s=params.human_idle_max_s,
                     mouse_wiggle_prob=params.mouse_wiggle_prob,
+                    telegram_bot_token=(params.telegram_bot_token or os.getenv("XHS_TELEGRAM_BOT_TOKEN") or "").strip() or None,
+                    telegram_chat_id=(params.telegram_chat_id or os.getenv("XHS_TELEGRAM_CHAT_ID") or "").strip() or None,
                 )
                 # Load comments library similar to CLI
                 comment_texts, comment_buckets = load_comment_library(params.comment_text_file)
@@ -289,6 +294,21 @@ RUNNER = RunManager()
 
 def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def _resolve_telegram_credentials(payload: Optional[Dict[str, Any]] = None) -> Tuple[Optional[str], Optional[str]]:
+    payload = payload or {}
+    token = ""
+    chat_id = ""
+    if payload.get("telegram_bot_token") is not None:
+        token = str(payload.get("telegram_bot_token") or "").strip()
+    if payload.get("telegram_chat_id") is not None:
+        chat_id = str(payload.get("telegram_chat_id") or "").strip()
+    if not token:
+        token = (os.getenv("XHS_TELEGRAM_BOT_TOKEN") or "").strip()
+    if not chat_id:
+        chat_id = (os.getenv("XHS_TELEGRAM_CHAT_ID") or "").strip()
+    return (token or None, chat_id or None)
 
 
 def _collect_known_keywords() -> List[str]:
@@ -603,6 +623,8 @@ async def start_run(payload: Dict[str, Any]) -> JSONResponse:
             comment_type_delay_max_ms=int(payload.get("comment_type_delay_max_ms", RunParams.comment_type_delay_max_ms)),
             comment_submit=bool(payload.get("comment_submit", RunParams.comment_submit)),
             comment_text_file=str(payload.get("comment_text_file", RunParams.comment_text_file)),
+            telegram_bot_token=(str(payload.get("telegram_bot_token")) if payload.get("telegram_bot_token") is not None else None),
+            telegram_chat_id=(str(payload.get("telegram_chat_id")) if payload.get("telegram_chat_id") is not None else None),
             verbose=bool(payload.get("verbose", RunParams.verbose)),
         )
     except Exception as exc:
@@ -632,6 +654,21 @@ async def get_status() -> JSONResponse:
 async def get_logs(from_index: int = 0) -> JSONResponse:
     next_idx, lines = await RUNNER.logs_since(from_index)
     return JSONResponse({"next": next_idx, "lines": lines})
+
+
+@app.post("/telegram/test")
+async def test_telegram(payload: Optional[Dict[str, Any]] = None) -> JSONResponse:
+    token, chat_id = _resolve_telegram_credentials(payload)
+    if not token or not chat_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing Telegram credentials. Set XHS_TELEGRAM_BOT_TOKEN/XHS_TELEGRAM_CHAT_ID or provide values in the form.",
+        )
+    text = f"XHS bot Telegram test\nsent_at: {_now_iso()}"
+    ok, reason = await send_telegram_text(bot_token=token, chat_id=chat_id, text=text)
+    if not ok:
+        raise HTTPException(status_code=502, detail=f"Telegram test failed: {reason}")
+    return JSONResponse({"ok": True, "detail": "Telegram test message sent."})
 
 
 @app.get("/keywords")

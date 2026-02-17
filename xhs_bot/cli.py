@@ -9,8 +9,10 @@ import time
 from datetime import datetime
 import math
 import os
+import re
 
 from urllib.parse import quote_plus
+from urllib import error as urllib_error, request as urllib_request
 
 from playwright.async_api import async_playwright, BrowserContext, Page, Playwright
 
@@ -30,6 +32,51 @@ COMMON_USER_AGENTS = [
 ]
 
 SESSION_LOG_PATH = Path("session_logs.jsonl")
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def load_dotenv() -> None:
+    """Load simple KEY=VALUE pairs from .env into process env (without override)."""
+    repo_root = Path(__file__).resolve().parent.parent
+    candidates = [Path.cwd() / ".env", repo_root / ".env"]
+    chosen: Optional[Path] = None
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            chosen = candidate
+            break
+    if not chosen:
+        return
+
+    try:
+        lines = chosen.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception:
+        return
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key or not _ENV_KEY_RE.match(key):
+            continue
+        value = value.strip()
+
+        # Handle quoted values and simple inline comments.
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        elif " #" in value:
+            value = value.split(" #", 1)[0].rstrip()
+
+        if key not in os.environ:
+            os.environ[key] = value
+
+
+load_dotenv()
 
 STEALTH_INIT_SCRIPT = r"""
 (() => {
@@ -260,6 +307,102 @@ def append_session_log(summary: Dict[str, Any]) -> None:
         pass
 
 
+def _build_telegram_summary_text(summary: Dict[str, Any]) -> str:
+    session_state = summary.get("session_state") if isinstance(summary.get("session_state"), dict) else {}
+    block_state = session_state.get("block_state") if isinstance(session_state, dict) else None
+    status = "completed"
+    if block_state == "login-required":
+        status = "login-required"
+    elif block_state == "rate-limit":
+        status = "rate-limit"
+
+    skip_breakdown = summary.get("skip_breakdown") or {}
+    skip_parts: List[str] = []
+    if isinstance(skip_breakdown, dict):
+        skip_parts = [f"{k}:{v}" for k, v in sorted(skip_breakdown.items())]
+
+    lines = [
+        "XHS cycle finished",
+        f"keyword: {summary.get('keyword', '-')}",
+        f"liked: {summary.get('liked', 0)}",
+        f"skipped: {summary.get('skipped', 0)}",
+        f"attempted: {summary.get('attempted', 0)}",
+        f"duration_sec: {summary.get('duration_sec', 0)}",
+        f"status: {status}",
+    ]
+    if skip_parts:
+        lines.append(f"skip_breakdown: {', '.join(skip_parts)}")
+
+    error_examples = summary.get("error_examples")
+    if isinstance(error_examples, list) and error_examples:
+        lines.append(f"error_examples: {len(error_examples)}")
+
+    text = "\n".join(lines).strip()
+    # Telegram hard limit is 4096 chars; keep margin.
+    if len(text) > 4000:
+        text = text[:3997] + "..."
+    return text
+
+
+async def _send_telegram_summary(config: "BotConfig", summary: Dict[str, Any]) -> None:
+    token = (config.telegram_bot_token or "").strip()
+    chat_id = (config.telegram_chat_id or "").strip()
+    if not token or not chat_id:
+        return
+
+    ok, reason = await send_telegram_text(
+        bot_token=token,
+        chat_id=chat_id,
+        text=_build_telegram_summary_text(summary),
+    )
+    if config.verbose:
+        if ok:
+            print("Telegram notification sent.")
+        else:
+            print(f"Telegram notification failed: {reason}")
+
+
+async def send_telegram_text(bot_token: str, chat_id: str, text: str) -> tuple[bool, str]:
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "disable_web_page_preview": True,
+    }
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    endpoint = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+
+    def _post() -> tuple[bool, str]:
+        req = urllib_request.Request(
+            endpoint,
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib_request.urlopen(req, timeout=10) as resp:
+                raw = resp.read().decode("utf-8", errors="ignore")
+            try:
+                data = json.loads(raw)
+            except Exception:
+                return False, "invalid-json-response"
+            if isinstance(data, dict) and data.get("ok") is True:
+                return True, "ok"
+            if isinstance(data, dict):
+                return False, str(data.get("description") or "telegram-api-error")
+            return False, "telegram-api-error"
+        except urllib_error.HTTPError as exc:
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8", errors="ignore")
+            except Exception:
+                pass
+            return False, f"http-{exc.code}:{detail or exc.reason}"
+        except Exception as exc:
+            return False, f"{exc.__class__.__name__}:{exc}"
+
+    return await asyncio.to_thread(_post)
+
+
 async def apply_latest_filter(page: Page, config: "BotConfig") -> bool:
     """Hover filter control and click the 最新 tag if it becomes available."""
     if config.verbose:
@@ -479,6 +622,8 @@ class BotConfig:
     preview_note_prob: float = DEFAULT_PREVIEW_NOTE_PROB
     preview_note_min_s: float = DEFAULT_PREVIEW_NOTE_MIN_S
     preview_note_max_s: float = DEFAULT_PREVIEW_NOTE_MAX_S
+    telegram_bot_token: Optional[str] = None
+    telegram_chat_id: Optional[str] = None
 
 
 async def create_context(config: BotConfig) -> tuple[Playwright, BrowserContext]:
@@ -1939,6 +2084,7 @@ async def cmd_like_latest(
         }
         print(f"[{summary['ts']}] Summary: {json.dumps(summary, ensure_ascii=False)}")
         append_session_log(summary)
+        await _send_telegram_summary(config, summary)
     finally:
         try:
             await context.close()
@@ -2006,6 +2152,18 @@ def parse_args(argv: List[str]) -> tuple[BotConfig, Any]:
     parser.add_argument("--comment-type-delay-min-ms", dest="comment_type_delay_min_ms", type=int, default=60, help="Minimum per-character typing delay (ms)")
     parser.add_argument("--comment-type-delay-max-ms", dest="comment_type_delay_max_ms", type=int, default=140, help="Maximum per-character typing delay (ms)")
     parser.add_argument("--comment-submit", dest="comment_submit", action="store_true", default=False, help="Submit the comment instead of dry-run typing only")
+    parser.add_argument(
+        "--telegram-bot-token",
+        dest="telegram_bot_token",
+        default=None,
+        help="Telegram bot token (or XHS_TELEGRAM_BOT_TOKEN)",
+    )
+    parser.add_argument(
+        "--telegram-chat-id",
+        dest="telegram_chat_id",
+        default=None,
+        help="Telegram chat ID for notifications (or XHS_TELEGRAM_CHAT_ID)",
+    )
     parser.add_argument("--verbose", action="store_true", help="Print verbose progress output")
 
     parser.set_defaults(headless=True, randomize_user_agent=False)
@@ -2027,6 +2185,8 @@ def parse_args(argv: List[str]) -> tuple[BotConfig, Any]:
     # Defaults that mirror local machine when not provided
     accept_language = ns.accept_language or guess_default_accept_language()
     timezone_id = ns.timezone_id or os.getenv("XHS_TIMEZONE_ID") or "Asia/Bangkok"
+    telegram_bot_token = (ns.telegram_bot_token or os.getenv("XHS_TELEGRAM_BOT_TOKEN") or "").strip() or None
+    telegram_chat_id = (ns.telegram_chat_id or os.getenv("XHS_TELEGRAM_CHAT_ID") or "").strip() or None
 
     comment_texts, comment_buckets = load_comment_library((ns.comment_text_file or "").strip() or None)
 
@@ -2069,6 +2229,8 @@ def parse_args(argv: List[str]) -> tuple[BotConfig, Any]:
         comment_texts=comment_texts,
         comment_submit=ns.comment_submit,
         comment_buckets=comment_buckets,
+        telegram_bot_token=telegram_bot_token,
+        telegram_chat_id=telegram_chat_id,
     )
     return config, ns
 
