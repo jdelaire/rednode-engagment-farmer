@@ -12,7 +12,7 @@ import os
 import re
 
 from urllib.parse import quote_plus
-from urllib import error as urllib_error, request as urllib_request
+
 
 from playwright.async_api import async_playwright, BrowserContext, Page, Playwright
 
@@ -307,7 +307,7 @@ def append_session_log(summary: Dict[str, Any]) -> None:
         pass
 
 
-def _build_telegram_summary_text(summary: Dict[str, Any]) -> str:
+def _build_summary_text(summary: Dict[str, Any]) -> str:
     session_state = summary.get("session_state") if isinstance(summary.get("session_state"), dict) else {}
     block_state = session_state.get("block_state") if isinstance(session_state, dict) else None
     status = "completed"
@@ -338,69 +338,44 @@ def _build_telegram_summary_text(summary: Dict[str, Any]) -> str:
         lines.append(f"error_examples: {len(error_examples)}")
 
     text = "\n".join(lines).strip()
-    # Telegram hard limit is 4096 chars; keep margin.
     if len(text) > 4000:
         text = text[:3997] + "..."
     return text
 
 
-async def _send_telegram_summary(config: "BotConfig", summary: Dict[str, Any]) -> None:
-    token = (config.telegram_bot_token or "").strip()
-    chat_id = (config.telegram_chat_id or "").strip()
-    if not token or not chat_id:
-        return
-
-    ok, reason = await send_telegram_text(
-        bot_token=token,
-        chat_id=chat_id,
-        text=_build_telegram_summary_text(summary),
-    )
+async def _send_notification_summary(config: "BotConfig", summary: Dict[str, Any]) -> None:
+    text = _build_summary_text(summary)
+    ok, reason = await send_notification(text)
     if config.verbose:
         if ok:
-            print("Telegram notification sent.")
+            print("Notification sent.")
         else:
-            print(f"Telegram notification failed: {reason}")
+            print(f"Notification failed: {reason}")
 
 
-async def send_telegram_text(bot_token: str, chat_id: str, text: str) -> tuple[bool, str]:
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "disable_web_page_preview": True,
-    }
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    endpoint = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+async def send_notification(text: str) -> tuple[bool, str]:
+    """Send a notification via openslackctl."""
+    import subprocess
 
-    def _post() -> tuple[bool, str]:
-        req = urllib_request.Request(
-            endpoint,
-            data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
+    def _run() -> tuple[bool, str]:
         try:
-            with urllib_request.urlopen(req, timeout=10) as resp:
-                raw = resp.read().decode("utf-8", errors="ignore")
-            try:
-                data = json.loads(raw)
-            except Exception:
-                return False, "invalid-json-response"
-            if isinstance(data, dict) and data.get("ok") is True:
+            result = subprocess.run(
+                ["openslackctl", "notify", text, "--source", "XHS-Bot"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if result.returncode == 0:
                 return True, "ok"
-            if isinstance(data, dict):
-                return False, str(data.get("description") or "telegram-api-error")
-            return False, "telegram-api-error"
-        except urllib_error.HTTPError as exc:
-            detail = ""
-            try:
-                detail = exc.read().decode("utf-8", errors="ignore")
-            except Exception:
-                pass
-            return False, f"http-{exc.code}:{detail or exc.reason}"
+            return False, f"exit-{result.returncode}:{result.stderr.strip() or result.stdout.strip()}"
+        except FileNotFoundError:
+            return False, "openslackctl-not-found"
+        except subprocess.TimeoutExpired:
+            return False, "timeout"
         except Exception as exc:
             return False, f"{exc.__class__.__name__}:{exc}"
 
-    return await asyncio.to_thread(_post)
+    return await asyncio.to_thread(_run)
 
 
 async def apply_latest_filter(page: Page, config: "BotConfig") -> bool:
@@ -622,8 +597,6 @@ class BotConfig:
     preview_note_prob: float = DEFAULT_PREVIEW_NOTE_PROB
     preview_note_min_s: float = DEFAULT_PREVIEW_NOTE_MIN_S
     preview_note_max_s: float = DEFAULT_PREVIEW_NOTE_MAX_S
-    telegram_bot_token: Optional[str] = None
-    telegram_chat_id: Optional[str] = None
 
 
 async def create_context(config: BotConfig) -> tuple[Playwright, BrowserContext]:
@@ -2084,7 +2057,7 @@ async def cmd_like_latest(
         }
         print(f"[{summary['ts']}] Summary: {json.dumps(summary, ensure_ascii=False)}")
         append_session_log(summary)
-        await _send_telegram_summary(config, summary)
+        await _send_notification_summary(config, summary)
     finally:
         try:
             await context.close()
@@ -2152,18 +2125,6 @@ def parse_args(argv: List[str]) -> tuple[BotConfig, Any]:
     parser.add_argument("--comment-type-delay-min-ms", dest="comment_type_delay_min_ms", type=int, default=60, help="Minimum per-character typing delay (ms)")
     parser.add_argument("--comment-type-delay-max-ms", dest="comment_type_delay_max_ms", type=int, default=140, help="Maximum per-character typing delay (ms)")
     parser.add_argument("--comment-submit", dest="comment_submit", action="store_true", default=False, help="Submit the comment instead of dry-run typing only")
-    parser.add_argument(
-        "--telegram-bot-token",
-        dest="telegram_bot_token",
-        default=None,
-        help="Telegram bot token (or XHS_TELEGRAM_BOT_TOKEN)",
-    )
-    parser.add_argument(
-        "--telegram-chat-id",
-        dest="telegram_chat_id",
-        default=None,
-        help="Telegram chat ID for notifications (or XHS_TELEGRAM_CHAT_ID)",
-    )
     parser.add_argument("--verbose", action="store_true", help="Print verbose progress output")
 
     parser.set_defaults(headless=True, randomize_user_agent=False)
@@ -2185,9 +2146,6 @@ def parse_args(argv: List[str]) -> tuple[BotConfig, Any]:
     # Defaults that mirror local machine when not provided
     accept_language = ns.accept_language or guess_default_accept_language()
     timezone_id = ns.timezone_id or os.getenv("XHS_TIMEZONE_ID") or "Asia/Bangkok"
-    telegram_bot_token = (ns.telegram_bot_token or os.getenv("XHS_TELEGRAM_BOT_TOKEN") or "").strip() or None
-    telegram_chat_id = (ns.telegram_chat_id or os.getenv("XHS_TELEGRAM_CHAT_ID") or "").strip() or None
-
     comment_texts, comment_buckets = load_comment_library((ns.comment_text_file or "").strip() or None)
 
     config = BotConfig(
@@ -2229,8 +2187,6 @@ def parse_args(argv: List[str]) -> tuple[BotConfig, Any]:
         comment_texts=comment_texts,
         comment_submit=ns.comment_submit,
         comment_buckets=comment_buckets,
-        telegram_bot_token=telegram_bot_token,
-        telegram_chat_id=telegram_chat_id,
     )
     return config, ns
 
